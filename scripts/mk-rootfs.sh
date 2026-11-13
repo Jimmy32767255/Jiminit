@@ -156,6 +156,53 @@ depends_on = ["notifier"]
 restart = "never"
 EOF
 
+cat > "$ROOT/etc/jiminit/services.d/watcher.toml" <<'EOF'
+# Example: keeps a 2s watchdog alive by pinging every second.
+exec = "/bin/sh"
+args = ["-c", "while true; do /sbin/jiminit --notify-send \"$NOTIFY_SOCKET\" WATCHDOG=1; sleep 1; done"]
+watchdog = "2s"
+restart = "never"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/watchdog-dead.toml" <<'EOF'
+# Example: never pings, so it must be killed by the watchdog.
+exec = "/bin/sh"
+args = ["-c", "sleep 600"]
+watchdog = "1s"
+restart = "never"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/broken-dep.toml" <<'EOF'
+# Example: a oneshot dependency that fails, so its dependent never starts.
+exec = "/bin/sh"
+args = ["-c", "echo broken dependency; exit 1"]
+oneshot = true
+restart = "never"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/broken-child.toml" <<'EOF'
+# Example: must never run because broken-dep fails.
+exec = "/bin/sh"
+args = ["-c", "echo BROKEN-CHILD-RAN; sleep 600"]
+depends_on = ["broken-dep"]
+restart = "never"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/parent.toml" <<'EOF'
+# Example: child2 depends on this; stopping it must cascade.
+exec = "/bin/sh"
+args = ["-c", "sleep 600"]
+restart = "never"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/child2.toml" <<'EOF'
+# Example: stopped when its dependency parent is stopped.
+exec = "/bin/sh"
+args = ["-c", "echo CHILD2-RAN; sleep 600"]
+depends_on = ["parent"]
+restart = "never"
+EOF
+
 rm -f "$IMAGE"
 mke2fs -q -F -t ext4 -L JIMROOT -d "$ROOT" "$IMAGE" "$SIZE"
 ls -lh "$IMAGE"

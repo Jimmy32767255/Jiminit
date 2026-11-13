@@ -188,6 +188,7 @@ user = "nobody"             # 以该用户运行（名字或数字 uid），默�
 group = "nogroup"           # 覆盖主组（名字或数字 gid）
 supplementary_groups = []   # 附加组；留空则用 /etc/group 里该用户的组
 notify = false              # true 时等待服务在 NOTIFY_SOCKET 上发 READY=1
+watchdog = "30s"            # 可选：要求服务每 30s 在 NOTIFY_SOCKET 发 WATCHDOG=1
 
 [limits]                    # 可选：cgroup v2 资源限制，缺省不限制
 memory_max = "64M"          # 字节或可选 K/M/G/T 后缀，或 "max"
@@ -199,11 +200,17 @@ cpu_max = "50000 100000"    # <quota> <period>，单位微秒
 
 - 按 `depends_on` 建依赖图，无依赖关系的服务并行拉起；依赖缺失或成环的服务会被
   跳过并告警；
+- 依赖项启动失败或最终退出（restart 策略决定不再拉起、连续失败放弃、或被手动
+  stop）时，尚未启动的依赖方会被标记失败并记 `not started: dependency ...`；
+  已经在运行的依赖方收到 SIGTERM 级联停止，依赖恢复后不会自动把它们再拉起来；
 - 默认 fork+exec 成功即视为就绪。`notify = true` 的服务会从环境里拿到
   `NOTIFY_SOCKET`（`/run/jiminit/notify/<name>.sock`，权限 0666），发出 `READY=1`
   后其依赖才会启动；超过 `ready_timeout_ms` 仍没收到则告警并按就绪继续，避免死等；
   `STATUS=...` 会转发到日志。`jiminit --notify-send "$NOTIFY_SOCKET" READY=1`
   可用于脚本；
+- `watchdog = "30s"` 时服务还必须周期性发 `WATCHDOG=1`（环境里同时提供
+  `WATCHDOG_USEC`）。超过一个周期没收到就记 `watchdog timeout` 并 SIGKILL，随后
+  照常交给 restart 策略：`never` 会停下来并标记失败，其他策略会退避重启；
 - 服务在独立 session/进程组中运行，stdin 是 `/dev/null`，stdout/stderr 经管道转发到
   `/dev/kmsg`，每行带 `svc/<name>: ` 前缀；
 - 默认每个服务被放进 `/sys/fs/cgroup/jiminit/<name>`（cgroup v2 统一层级），关机超时
@@ -362,6 +369,10 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - VT 之间切换只能靠内核快捷键，jiminit 不处理 `chvt`/键盘；
 - 资源限制只有 `memory.max`/`pids.max`/`cpu.max`，没有 io.max、cpuset、权重，
   也没有全局默认限制；
+- 健康检查只有 sd_notify 看门狗，没有 `health_cmd` 之类的外部探测；看门狗只校验
+  有没有收到 `WATCHDOG=1`，不校验 `WATCHDOG_PID`，也不支持 `WATCHDOG=trigger`；
+- 依赖只有 `depends_on`（类似 Requires），没有 After/Before 的独立顺序控制，也没有
+  自动重启依赖方的反向传播；级联停止只发生在依赖最终失败或被手动 stop 时；
 - OOM 靠主循环轮询 `memory.events` 发现（不是事件驱动）；cgroup 目录回收后计数
   归零，只用于日志提示，重启决策仍由退出状态和 restart 策略决定；
 - 日志文件只保留一份旧的 `.1`，不压缩、不外发 syslog；文件写失败会静默停用该

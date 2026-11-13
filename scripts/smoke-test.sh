@@ -122,6 +122,9 @@ wait_for 'ok after restarting' 15
 wait_count 'svc/after: started' 2 20
 printf 'jiminit --service notifier reload\n' >"$FIFO"
 wait_for 'ok notifier reloaded' 15
+printf 'jiminit --service parent stop\n' >"$FIFO"
+wait_for 'ok parent stopping' 15
+wait_for 'stopping because dependency' 15
 
 # 5. Soft reboot: every session is stopped, stage 2 re-execs and getty comes
 #    back.
@@ -183,6 +186,19 @@ grep -q 'svc/cg: 0::/jiminit/cg' "$LOG" || fail "service was not placed in its c
 grep -q 'svc/hog: OOM-killed' "$LOG" || fail "OOM kill was not detected"
 grep -q 'svc/notifier: waiting for READY=1' "$LOG" || fail "notify service did not get NOTIFY_SOCKET"
 grep -q 'svc/notifier: ready' "$LOG" || fail "notify service never reported READY=1"
+grep -q 'svc/watcher: watchdog every 2000 ms' "$LOG" || fail "watchdog interval was not passed to the service"
+if grep -q 'svc/watcher: watchdog timeout' "$LOG"; then
+    fail "a live watchdog service was killed"
+fi
+grep -q 'svc/watchdog-dead: watchdog timeout' "$LOG" || fail "watchdog timeout was not detected"
+grep -q 'not started: dependency' "$LOG" || fail "a service started although its dependency failed"
+if grep -q 'BROKEN-CHILD-RAN' "$LOG"; then
+    fail "a dependent service ran after its dependency failed"
+fi
+grep -q 'stopping because dependency' "$LOG" || fail "stopping a dependency did not cascade"
+if grep -q 'CHILD2-RAN' "$LOG"; then
+    : # child2 ran before being stopped, which is fine; only the cascade matters
+fi
 ready_line=$(line_of 'svc/notifier: ready')
 after_line=$(line_of 'svc/after: started')
 [ -n "$ready_line" ] && [ -n "$after_line" ] && [ "$ready_line" -lt "$after_line" ] ||
@@ -190,4 +206,4 @@ after_line=$(line_of 'svc/after: started')
 [ "$(count 'login:')" -ge 3 ] || fail "getty did not come back after the soft reboot"
 grep -q 'reboot: Power down' "$LOG" || fail "poweroff was not requested"
 
-echo "PASS: modules, fsck, fstab, switch_root, PID 1, getty/login, runlevels, services, soft reboot and poweroff all work"
+echo "PASS: modules, fsck, fstab, switch_root, PID 1, getty/login, runlevels, dependencies, watchdog, soft reboot and poweroff all work"

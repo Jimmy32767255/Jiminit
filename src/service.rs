@@ -80,6 +80,8 @@ pub struct ServiceSpec {
     pub supplementary_groups: Vec<String>,
     /// Wait for `READY=1` on the sd_notify socket before starting dependents.
     pub notify: bool,
+    /// The service must send `WATCHDOG=1` on its notify socket this often.
+    pub watchdog: Option<Duration>,
     /// cgroup v2 resource limits (empty means unlimited).
     pub limits: Limits,
 }
@@ -100,6 +102,8 @@ struct ServiceFile {
     supplementary_groups: Vec<String>,
     #[serde(default)]
     notify: bool,
+    /// Human-readable watchdog interval, e.g. `30s` or `500ms`.
+    watchdog: Option<String>,
     #[serde(default)]
     limits: LimitsFile,
 }
@@ -164,6 +168,7 @@ pub fn parse_service(name: &str, text: &str) -> Result<ServiceSpec> {
         group: file.group,
         supplementary_groups: file.supplementary_groups,
         notify: file.notify,
+        watchdog: parse_watchdog(name, file.watchdog.as_deref())?,
         limits: parse_limits(name, file.limits)?,
     })
 }
@@ -199,6 +204,42 @@ fn parse_limits(name: &str, file: LimitsFile) -> Result<Limits> {
         pids_max: file.pids_max,
         cpu_max,
     })
+}
+
+fn parse_watchdog(name: &str, value: Option<&str>) -> Result<Option<Duration>> {
+    let Some(text) = value else {
+        return Ok(None);
+    };
+    match parse_duration(text) {
+        Some(duration) => Ok(Some(duration)),
+        None => bail!(
+            "service `{name}` has an invalid `watchdog` value `{text}`: \
+             expected a positive interval such as `500ms`, `30s` or `5m`"
+        ),
+    }
+}
+
+/// Parse `500ms`, `30s`, `5m`, `1h`; a bare number means seconds.
+fn parse_duration(text: &str) -> Option<Duration> {
+    let text = text.trim();
+    let (number, unit_ms) = if let Some(value) = text.strip_suffix("ms") {
+        (value, 1u64)
+    } else if let Some(value) = text.strip_suffix('s') {
+        (value, 1_000)
+    } else if let Some(value) = text.strip_suffix('m') {
+        (value, 60_000)
+    } else if let Some(value) = text.strip_suffix('h') {
+        (value, 3_600_000)
+    } else if let Some(value) = text.strip_suffix('d') {
+        (value, 86_400_000)
+    } else {
+        (text, 1_000)
+    };
+    let number: u64 = number.trim().parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    Some(Duration::from_millis(number.checked_mul(unit_ms)?))
 }
 
 fn valid_memory_max(value: &str) -> bool {
@@ -371,6 +412,8 @@ struct Running {
     ready_deadline: Option<Instant>,
     /// Last `memory.events` oom_kill count we reported.
     oom_seen: u64,
+    /// When the next WATCHDOG=1 must arrive, if the service has a watchdog.
+    watchdog_deadline: Option<Instant>,
 }
 
 struct NotifyPipe {
@@ -403,6 +446,11 @@ pub struct Supervisor {
     notify: Vec<NotifyPipe>,
     /// Services stopped on request; their exit must not trigger a restart.
     manual_stop: HashSet<usize>,
+    /// Services that ended for good (or were stopped because a dependency
+    /// did). Dependents must not start while a dependency is in this set.
+    failed: HashSet<usize>,
+    /// Oneshot services that completed successfully.
+    completed: HashSet<usize>,
     /// Services that should start again once their stop completes.
     restart_after: HashSet<usize>,
     ready_timeout: Duration,
@@ -474,6 +522,8 @@ impl Supervisor {
             logs: Vec::new(),
             notify: Vec::new(),
             manual_stop: HashSet::new(),
+            failed: HashSet::new(),
+            completed: HashSet::new(),
             restart_after: HashSet::new(),
             ready_timeout: Duration::from_millis(5_000),
             stopping: false,
@@ -509,6 +559,9 @@ impl Supervisor {
     }
 
     fn service_ready(&self, idx: usize) -> bool {
+        if self.failed.contains(&idx) {
+            return false;
+        }
         if self.services[idx].oneshot {
             // A oneshot dependency is "ready" once it has run (its exit is
             // the completion signal), so do not deadlock waiting for READY.
@@ -525,6 +578,59 @@ impl Supervisor {
                 .map(|dep_idx| self.service_ready(dep_idx))
                 .unwrap_or(true)
         })
+    }
+
+    /// First dependency that has failed for good, if any.
+    fn failed_dependency(&self, idx: usize) -> Option<String> {
+        self.services[idx].depends_on.iter().find_map(|dep| {
+            let dep_idx = self.services.iter().position(|spec| &spec.name == dep)?;
+            self.failed.contains(&dep_idx).then(|| dep.clone())
+        })
+    }
+
+    /// Mark a service as failed for good and stop everything that depends on
+    /// it (transitively). Dependents are not restarted automatically.
+    fn mark_failed(&mut self, idx: usize) {
+        if !self.failed.insert(idx) {
+            return;
+        }
+        let name = self.services[idx].name.clone();
+        self.stop_dependents(&name, "failed");
+    }
+
+    fn stop_dependents(&mut self, parent_name: &str, reason: &str) {
+        let mut stack = vec![parent_name.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(parent_name) = stack.pop() {
+            let targets: Vec<usize> = self
+                .services
+                .iter()
+                .enumerate()
+                .filter(|(i, spec)| {
+                    !seen.contains(i) && spec.depends_on.iter().any(|d| d == &parent_name)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            for target in targets {
+                seen.insert(target);
+                let target_name = self.services[target].name.clone();
+                self.failed.insert(target);
+                self.pending_start.retain(|i| *i != target);
+                self.pending.retain(|item| item.idx != target);
+                if let Some(pid) = self.pid_for(target) {
+                    crate::warn!(
+                        "svc/{target_name}: stopping because dependency `{parent_name}` {reason}"
+                    );
+                    self.manual_stop.insert(target);
+                    signal_service(pid, Signal::SIGTERM);
+                } else {
+                    crate::warn!(
+                        "svc/{target_name}: not started: dependency `{parent_name}` {reason}"
+                    );
+                }
+                stack.push(target_name);
+            }
+        }
     }
 
     /// Switch to `level`: stop services that no longer belong, drop their
@@ -640,6 +746,27 @@ impl Supervisor {
             );
         }
 
+        // A watchdog service that stops reporting is treated as failed: kill
+        // it and let the normal exit/restart path decide what happens next.
+        let mut expired = Vec::new();
+        for (pid, run) in &self.running {
+            if let Some(deadline) = run.watchdog_deadline {
+                if now >= deadline {
+                    expired.push((*pid, run.idx));
+                }
+            }
+        }
+        for (pid, idx) in expired {
+            if let Some(run) = self.running.get_mut(&pid) {
+                run.watchdog_deadline = None;
+            }
+            crate::warn!(
+                "svc/{}: watchdog timeout (pid {pid}); killing",
+                self.services[idx].name
+            );
+            signal_service(pid, Signal::SIGKILL);
+        }
+
         // Report OOM kills recorded in the service cgroup. The exit itself is
         // handled by the normal restart policy.
         let mut oom = Vec::new();
@@ -689,13 +816,19 @@ impl Supervisor {
             if self.is_running(idx) {
                 continue;
             }
+            let name = self.services[idx].name.clone();
+            if let Some(dep) = self.failed_dependency(idx) {
+                crate::warn!("svc/{name}: not started: dependency `{dep}` failed");
+                self.failed.insert(idx);
+                continue;
+            }
             if !self.deps_ready(idx) {
                 blocked.push(idx);
                 continue;
             }
-            let name = self.services[idx].name.clone();
             if let Err(e) = self.spawn(idx, 0) {
                 crate::err!("svc/{name}: cannot start: {e:#}");
+                self.mark_failed(idx);
             }
         }
         self.pending_start = blocked;
@@ -710,6 +843,7 @@ impl Supervisor {
     pub fn drain_notify(&mut self) {
         let mut ready = Vec::new();
         let mut status = Vec::new();
+        let mut watchdog = Vec::new();
         for pipe in &self.notify {
             loop {
                 let mut buf = [0u8; 1024];
@@ -720,6 +854,8 @@ impl Supervisor {
                             let line = line.trim();
                             if line == "READY=1" {
                                 ready.push(pipe.name.clone());
+                            } else if line == "WATCHDOG=1" {
+                                watchdog.push(pipe.name.clone());
                             } else if let Some(value) = line.strip_prefix("STATUS=") {
                                 status.push((pipe.name.clone(), value.to_string()));
                             }
@@ -753,6 +889,19 @@ impl Supervisor {
         for (name, value) in status {
             crate::info!("svc/{name}: status: {value}");
         }
+        for name in watchdog {
+            let Some(idx) = self.services.iter().position(|s| s.name == name) else {
+                continue;
+            };
+            let Some(interval) = self.services[idx].watchdog else {
+                continue;
+            };
+            for run in self.running.values_mut() {
+                if run.idx == idx {
+                    run.watchdog_deadline = Some(Instant::now() + interval);
+                }
+            }
+        }
     }
 
     /// Runtime control from the control socket.
@@ -771,6 +920,9 @@ impl Supervisor {
                 if self.is_running(idx) {
                     bail!("service `{name}` is already running");
                 }
+                if let Some(dep) = self.failed_dependency(idx) {
+                    bail!("service `{name}` cannot start: dependency `{dep}` failed");
+                }
                 self.pending_start.retain(|i| *i != idx);
                 self.pending.retain(|item| item.idx != idx);
                 self.spawn(idx, 0)
@@ -785,6 +937,8 @@ impl Supervisor {
                 self.restart_after.remove(&idx);
                 crate::info!("svc/{name}: stopping on request (SIGTERM)");
                 signal_service(pid, Signal::SIGTERM);
+                self.failed.insert(idx);
+                self.stop_dependents(name, "was stopped");
                 Ok(format!("ok {name} stopping"))
             }
             "restart" => {
@@ -855,7 +1009,7 @@ impl Supervisor {
             ),
             None => None,
         };
-        let notify_path = if spec.notify {
+        let notify_path = if spec.notify || spec.watchdog.is_some() {
             Some(self.notify_socket(&spec.name)?)
         } else {
             None
@@ -874,6 +1028,8 @@ impl Supervisor {
         set_nonblocking(&read_fd);
 
         self.starts[idx] += 1;
+        self.failed.remove(&idx);
+        self.completed.remove(&idx);
         match unsafe { fork() }.context("fork")? {
             ForkResult::Parent { child } => {
                 drop(write_fd);
@@ -896,11 +1052,21 @@ impl Supervisor {
                         ready: !spec.notify,
                         ready_deadline,
                         oom_seen,
+                        watchdog_deadline: spec.watchdog.map(|d| Instant::now() + d),
                     },
                 );
                 crate::info!("svc/{}: started (pid {child})", spec.name);
                 if let Some(path) = &notify_path {
-                    crate::info!("svc/{}: waiting for READY=1 on {path}", spec.name);
+                    if spec.notify {
+                        crate::info!("svc/{}: waiting for READY=1 on {path}", spec.name);
+                    }
+                    if let Some(watchdog) = spec.watchdog {
+                        crate::info!(
+                            "svc/{}: watchdog every {} ms on {path}",
+                            spec.name,
+                            watchdog.as_millis()
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -914,7 +1080,9 @@ impl Supervisor {
         let Some(run) = self.running.remove(&pid) else {
             return false;
         };
-        let spec = &self.services[run.idx];
+        let idx = run.idx;
+        let name = self.services[idx].name.clone();
+        let spec = self.services[idx].clone();
         let success = matches!(status, WaitStatus::Exited(_, 0));
         let uptime = run.started.elapsed();
         let mut failures = run.failures;
@@ -922,63 +1090,73 @@ impl Supervisor {
             failures = 0;
         }
 
-        crate::info!("svc/{}: {} after {:?}", spec.name, describe(status), uptime);
+        crate::info!("svc/{name}: {} after {:?}", describe(status), uptime);
 
         // Read the OOM counter before the cgroup directory disappears: a
         // service killed by the kernel may be reaped before the next tick.
         if spec.limits.memory_max.is_some() {
-            let count = crate::cgroup::oom_kill_count(&spec.name);
+            let count = crate::cgroup::oom_kill_count(&name);
             if count > run.oom_seen {
-                crate::warn!("svc/{}: OOM-killed ({} total)", spec.name, count);
+                crate::warn!("svc/{name}: OOM-killed ({count} total)");
             }
         }
 
         // A stop requested through the control socket must not be undone by
         // the restart policy; an explicit restart starts once the exit is seen.
-        if self.manual_stop.remove(&run.idx) {
-            if self.restart_after.remove(&run.idx) {
+        if self.manual_stop.remove(&idx) {
+            if self.restart_after.remove(&idx) {
                 self.pending.push(PendingRestart {
-                    idx: run.idx,
+                    idx,
                     due: Instant::now(),
                     failures: 0,
                 });
+            } else {
+                self.mark_failed(idx);
             }
             return true;
         }
 
         // A service stopped because of a runlevel switch must not come back.
-        if !self.members().contains(&run.idx) {
+        if !self.members().contains(&idx) {
             return true;
         }
 
-        if self.stopping || spec.oneshot {
+        if self.stopping {
             return true;
         }
+
+        if spec.oneshot {
+            if success {
+                self.completed.insert(idx);
+            } else {
+                self.mark_failed(idx);
+            }
+            return true;
+        }
+
         let restart = match spec.restart {
             RestartPolicy::Always => true,
             RestartPolicy::OnFailure => !success,
             RestartPolicy::Never => false,
         };
         if !restart {
+            self.mark_failed(idx);
             return true;
         }
 
         failures += 1;
         if failures >= MAX_CONSECUTIVE_FAILURES {
-            crate::warn!(
-                "svc/{}: {failures} consecutive failures; giving up",
-                spec.name
-            );
+            crate::warn!("svc/{name}: {failures} consecutive failures; giving up");
+            self.mark_failed(idx);
             return true;
         }
         let delay = backoff_delay(failures);
         crate::warn!(
-            "svc/{}: restarting in {} ms (attempt {failures})",
-            spec.name,
+            "svc/{name}: restarting in {} ms (attempt {failures})",
             delay.as_millis()
         );
         self.pending.push(PendingRestart {
-            idx: run.idx,
+            idx,
             due: Instant::now() + delay,
             failures,
         });
@@ -1270,6 +1448,9 @@ fn build_env(spec: &ServiceSpec, notify_path: Option<&str>, home: Option<&str>) 
     if let Some(path) = notify_path {
         set("NOTIFY_SOCKET", path);
     }
+    if let Some(watchdog) = spec.watchdog {
+        set("WATCHDOG_USEC", &watchdog.as_micros().to_string());
+    }
     for (key, value) in &spec.env {
         set(key, value);
     }
@@ -1302,6 +1483,7 @@ mod tests {
             group: None,
             supplementary_groups: Vec::new(),
             notify: false,
+            watchdog: None,
             limits: Limits::default(),
         }
     }
@@ -1484,6 +1666,29 @@ oneshot = true
         services[1].runlevels = vec![Level::MultiUser];
         let single = members_of(&services, Level::Single);
         assert_eq!(single, BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn parses_watchdog_intervals() {
+        let svc = parse_service("demo", "exec = \"/bin/true\"\nwatchdog = \"500ms\"\n").unwrap();
+        assert_eq!(svc.watchdog, Some(Duration::from_millis(500)));
+        let svc = parse_service("demo", "exec = \"/bin/true\"\nwatchdog = \"30s\"\n").unwrap();
+        assert_eq!(svc.watchdog, Some(Duration::from_secs(30)));
+        let svc = parse_service("demo", "exec = \"/bin/true\"\nwatchdog = \"5m\"\n").unwrap();
+        assert_eq!(svc.watchdog, Some(Duration::from_secs(300)));
+        let svc = parse_service("demo", "exec = \"/bin/true\"\nwatchdog = \"45\"\n").unwrap();
+        assert_eq!(svc.watchdog, Some(Duration::from_secs(45)));
+    }
+
+    #[test]
+    fn rejects_invalid_watchdog_intervals() {
+        for value in ["0s", "soon", "-1s", "1.5s"] {
+            let text = format!("exec = \"/bin/true\"\nwatchdog = \"{value}\"\n");
+            assert!(
+                parse_service("demo", &text).is_err(),
+                "`{value}` should be rejected"
+            );
+        }
     }
 
     #[test]

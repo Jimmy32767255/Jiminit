@@ -10,9 +10,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::ExitStatus;
+use std::time::{Duration, Instant};
 
 pub const MODULES_FILE: &str = "/etc/modules";
 pub const MODPROBE_DIR: &str = "/etc/modprobe.d";
+
+/// Upper bound for a single modprobe/install helper invocation.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Rules {
@@ -138,11 +142,19 @@ pub fn load(modules_path: &Path, rules_dir: &Path) -> Result<()> {
 }
 
 fn load_one(modprobe: &str, rules: &Rules, name: &str, params: &[String]) -> Result<()> {
-    let target = rules.aliases.get(name).map(String::as_str).unwrap_or(name);
+    let alias = rules.aliases.get(name).map(String::as_str);
+    let target = alias.unwrap_or(name);
 
-    if rules.blacklist.contains(name) || rules.blacklist.contains(target) {
-        crate::info!("modules: {name} is blacklisted; skipping");
-        return Ok(());
+    // Like modprobe(8), a blacklist only suppresses alias lookups. A module
+    // named explicitly in /etc/modules is still loaded: otherwise a blacklisted
+    // storage driver would silently make the root device unreachable.
+    if alias.is_some() {
+        if rules.blacklist.contains(target) {
+            crate::info!("modules: alias {name} -> {target} is blacklisted; skipping");
+            return Ok(());
+        }
+    } else if rules.blacklist.contains(name) {
+        crate::warn!("modules: {name} is blacklisted but listed explicitly; loading it");
     }
 
     if let Some(command) = rules.install.get(target) {
@@ -162,11 +174,9 @@ fn load_one(modprobe: &str, rules: &Rules, name: &str, params: &[String]) -> Res
         crate::info!("modules: modprobe {target} {}", args.join(" "));
     }
 
-    let status = std::process::Command::new(modprobe)
-        .arg(target)
-        .args(&args)
-        .status()
-        .with_context(|| format!("run {modprobe} {target}"))?;
+    let mut command = std::process::Command::new(modprobe);
+    command.arg(target).args(&args);
+    let status = run_with_timeout(command).with_context(|| format!("run {modprobe} {target}"))?;
     check_status("modprobe", target, status)
 }
 
@@ -179,12 +189,29 @@ fn run_install(command: &str, target: &str) -> Result<()> {
         bail!("no shell available to run the install command for {target}");
     };
 
-    let status = std::process::Command::new(shell)
-        .arg("-c")
-        .arg(command)
-        .status()
+    let mut command_line = std::process::Command::new(shell);
+    command_line.arg("-c").arg(command);
+    let status = run_with_timeout(command_line)
         .with_context(|| format!("run install command for {target}: {command}"))?;
     check_status("install command for", target, status)
+}
+
+/// Run a helper with a hard timeout: a hung modprobe or install command must
+/// not block the initramfs forever.
+fn run_with_timeout(mut command: std::process::Command) -> Result<ExitStatus> {
+    let mut child = command.spawn().context("spawn helper")?;
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().context("wait for helper")? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("helper timed out after {COMMAND_TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn check_status(what: &str, target: &str, status: ExitStatus) -> Result<()> {

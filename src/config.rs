@@ -1,13 +1,15 @@
-//! Configuration file (`/etc/jiminit.toml`), with defaults so a missing or
-//! partial file still boots.
+//! Configuration file (`/etc/jiminit.toml`). Missing keys fall back to
+//! defaults; unknown keys and malformed values are hard errors, so a typo
+//! cannot silently change the boot into something unexpected.
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
 pub const DEFAULT_PATH: &str = "/etc/jiminit.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Host name to set in stage 2.
     pub hostname: String,
@@ -58,23 +60,31 @@ impl Default for Config {
     }
 }
 
-/// Load the configuration, falling back to defaults with a log message on any
-/// problem. A missing file is normal.
-pub fn load(path: &Path) -> Config {
+/// Load the configuration. A missing file is normal and yields defaults; a
+/// read error or a malformed file (unknown keys, wrong types) is returned to
+/// the caller so that stage 1/stage 2 can fall back to the rescue shell.
+pub fn load(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
-        Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                crate::warn!("{}: invalid config ({e}); using defaults", path.display());
-                Config::default()
-            }
-        },
+        Ok(text) => {
+            let cfg = toml::from_str::<Config>(&text)
+                .with_context(|| format!("parse {}", path.display()))?;
+            Ok(cfg)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             crate::info!("{}: not found; using defaults", path.display());
-            Config::default()
+            Ok(Config::default())
         }
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// Like [`load`], but logs the error and falls back to defaults. Only the
+/// rescue shell uses this: it must keep working even with a broken config.
+pub fn load_or_default(path: &Path) -> Config {
+    match load(path) {
+        Ok(cfg) => cfg,
         Err(e) => {
-            crate::warn!("{}: cannot read ({e}); using defaults", path.display());
+            crate::warn!("{e:#}; using defaults");
             Config::default()
         }
     }
@@ -107,6 +117,35 @@ mod tests {
         assert!(!cfg.respawn);
         assert_eq!(cfg.console, "/dev/console");
         assert_eq!(cfg.init_path, "/sbin/jiminit");
+    }
+
+    #[test]
+    fn load_rejects_unknown_keys_and_bad_types() {
+        let path = std::env::temp_dir().join(format!(
+            "jiminit-config-{}-{}.toml",
+            std::process::id(),
+            line!()
+        ));
+
+        std::fs::write(&path, "hostnam = \"typo\"\n").unwrap();
+        assert!(load(&path).is_err(), "unknown key was accepted");
+
+        std::fs::write(&path, "hostname = \"x\"\nrespawn = \"yes\"\n").unwrap();
+        assert!(load(&path).is_err(), "wrong value type was accepted");
+
+        std::fs::write(&path, "hostname = \"ok\"\n").unwrap();
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.hostname, "ok");
+        assert_eq!(cfg.console, "/dev/console");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_missing_file_uses_defaults() {
+        let path = std::env::temp_dir().join("jiminit-config-does-not-exist.toml");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(load(&path).unwrap(), Config::default());
     }
 
     #[test]

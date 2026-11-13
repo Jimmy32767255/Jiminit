@@ -44,7 +44,8 @@ pub fn run() -> Result<()> {
     crate::log::init();
     crate::mount::mount_pseudo_fs();
 
-    let cfg = crate::config::load(Path::new(crate::config::DEFAULT_PATH));
+    let cfg = crate::config::load(Path::new(crate::config::DEFAULT_PATH))
+        .context("load configuration")?;
     crate::info!("stage2: starting as pid {}", nix::unistd::getpid());
     if let Ok(n) = std::env::var("JIMINIT_SOFT_REBOOTS") {
         crate::info!("soft reboot #{n}: running stage2 again");
@@ -216,7 +217,7 @@ fn parse_default_level(cfg: &Config) -> Level {
 /// Fallback loop used when a stage fails: keep a shell alive on the console so
 /// the machine is still usable and PID 1 never exits.
 pub fn rescue() -> ! {
-    let cfg = crate::config::load(Path::new(crate::config::DEFAULT_PATH));
+    let cfg = crate::config::load_or_default(Path::new(crate::config::DEFAULT_PATH));
     let shell = if Path::new(&cfg.shell).exists() {
         cfg.shell.clone()
     } else {

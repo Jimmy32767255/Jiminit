@@ -45,7 +45,10 @@ scripts/
 1. 挂载 `devtmpfs` 到 `/dev`、`proc`、`sysfs`；
 2. 按 initramfs 里的 `/etc/modules` 逐行 `modprobe`（支持 `模块名 参数...`），并应用
    `/etc/modprobe.d/*.conf` 的 `options`/`blacklist`/`install`/`alias` 规则；找不到
-   modprobe 或任一模块加载失败都会中止启动、进入 rescue；
+   modprobe 或任一模块加载失败都会中止启动、进入 rescue。`blacklist` 与 modprobe(8)
+   一致，只拦截 alias 解析——显式写在 `/etc/modules` 里的模块仍会加载（否则被
+   blacklist 的存储驱动会让根设备直接不可达），单条 modprobe/install 命令超过 30s
+   会被杀掉并判定失败；
 3. 解析内核命令行：
    - `root=`：`/dev/xxx`、`UUID=...`、`PARTUUID=...`（不支持 `LABEL=`）；
    - `rootfstype=`（可省略，省略时先让内核自动探测，失败再依次试 ext4/xfs/btrfs/vfat）；
@@ -56,13 +59,15 @@ scripts/
    `/usr/sbin`、`/usr/bin`）才执行，`fsck=no` 可在内核命令行关闭；退出码 4/8/16/32
    等视为失败，拒绝挂载并进入 rescue（0/1/2 视为可用）；
 6. 挂载到 `/newroot`，读取 `/newroot/etc/fstab`，把根以外的条目（跳过 swap、伪文件
-   系统、`noauto` 和重复挂载点）挂到 `/newroot/<mountpoint>`；`nofail` 的失败只告警，
-   其余失败中止启动。`bind`/`rbind` 转成对应挂载标志，`_netdev`、`x-*`、`comment=`、
+   系统、`noauto` 和重复挂载点）挂到 `/newroot/<mountpoint>`；挂载点先规范化（折叠
+   重复 `/` 和 `.`、解析 `..`、拒绝越过根），`/data/` 与 `/data` 视为同一条目；`nofail`
+   的失败只告警，其余失败中止启动。`bind`/`rbind` 转成对应挂载标志，`_netdev`、`x-*`、`comment=`、
    `users` 等只属于 mount(8) 的选项会被丢弃而不是传给内核；其余选项作为文件系统
    参数透传；
 7. 从 `/newroot/etc/jiminit.toml` 读 `init_path`（stage1 以真实根的配置为准），并校验
    该可执行文件存在；
-8. 把 `/dev`、`/proc`、`/sys` 的挂载点 MS_MOVE 进新根；
+8. 把 `/dev`、`/proc`、`/sys` 的挂载点 MS_MOVE 进新根；移动失败时若目标已经是挂载点
+   则记 info，否则中止启动；
 9. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
    （与 busybox switch_root 相同的收尾，缺 `chroot(".")` 会导致后续 exec 仍看旧根）；
 10. `execve("/sbin/jiminit", ["--stage2"])`。
@@ -171,6 +176,10 @@ ttys = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/t
 serial_ttys = ["/dev/ttyS0"]       # 不存在的设备会被跳过
 ```
 
+解析是严格的：未知键、字段类型错误、文件读取失败都会让该阶段失败并进入 rescue
+shell；只有文件缺失才使用全默认值。rescue shell 自己则用 `load_or_default`，保证
+配置写坏时仍能登录修复。
+
 ## 构建与测试
 
 依赖：Rust、`qemu-system-x86`、`busybox`（静态链接）、`e2fsprogs`、`cpio`、`gzip`，
@@ -231,7 +240,7 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - fsck 只检查根文件系统，且依赖 initramfs 里自带 `fsck` 程序（没有就跳过并记日志）；
   真正可用的 e2fsprogs 还没打进测试镜像；
 - fstab 只用于 switch_root 前挂载根以外的条目：不支持 `LABEL=`/`/dev/disk/by-*`，
-  不处理 swap，也不做挂载点自动创建或路径规范化；
+  不处理 swap，也不自动创建挂载点；
 - fstab 里不认识的选项按文件系统参数透传（`data=journal` 之类可用；拼错的选项会
   由内核拒绝并中止启动），没有实现 util-linux 的完整选项表；
 - `PARTUUID=` 的 MBR 分支只支持主分区（`diskid-01`…`-04`），不支持扩展/逻辑分区；
@@ -249,8 +258,7 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - 软重启只重新执行 stage2：initramfs 已经不在，内核也不会重新引导，所以
   `root=`/initramfs/内核参数相关的改动必须走真正的重启；
 - getty 反复启动失败时固定每 500ms 重拉一次，没有退避，会持续刷日志；
-- 配置文件的未知键被 serde 忽略，字段类型错误会让整份配置回退默认值（日志里有
-  warning），不会进入 rescue；
+- 配置解析失败（未知键/类型错误）会进入 rescue 而不是带默认值继续启动；
 - 软重启用 tmpfs 顶替 `/run`、`/tmp`，旧内容若原本在根文件系统上仍会占用空间
   （真重启才会回收）。
 

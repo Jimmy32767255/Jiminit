@@ -51,7 +51,8 @@ pub fn run() -> Result<()> {
 
     // The real root owns the configuration; read it before choosing which
     // binary to exec so a customized init_path is honored.
-    let cfg = crate::config::load(Path::new("/newroot/etc/jiminit.toml"));
+    let cfg = crate::config::load(Path::new("/newroot/etc/jiminit.toml"))
+        .context("load configuration from the new root")?;
     let init_path = cfg.init_path.clone();
     let stage2_path = Path::new("/newroot").join(init_path.trim_start_matches('/'));
     if !stage2_path.exists() {
@@ -69,7 +70,12 @@ pub fn run() -> Result<()> {
         }
         match crate::mount::mount_move(sub, &target) {
             Ok(()) => crate::info!("moved {sub} to {target}"),
-            Err(e) => crate::warn!("moving {sub} to {target} failed: {e}"),
+            Err(_e) if crate::mount::is_mountpoint(&target) => {
+                crate::info!("{target} is already a mount point; leaving {sub} in place");
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("move {sub} to {target}"));
+            }
         }
     }
 

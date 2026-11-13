@@ -3,26 +3,23 @@
 use nix::errno::Errno;
 use nix::mount::{mount, MsFlags};
 
-/// Mount (`EBUSY` is treated as success: the filesystem is already mounted).
-fn mount_or_busy(
-    source: Option<&str>,
-    target: &str,
-    fstype: Option<&str>,
-    flags: MsFlags,
-    data: Option<&str>,
-) -> Result<(), Errno> {
-    match mount(source, target, fstype, flags, data) {
-        Ok(()) => Ok(()),
-        Err(Errno::EBUSY) => Ok(()),
-        Err(e) => Err(e),
-    }
+/// Is `target` currently a mount point? This tells "already mounted" apart
+/// from "something else is in the way" when mount(2) returns `EBUSY`.
+pub fn is_mountpoint(target: &str) -> bool {
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .map(|info| {
+            info.lines()
+                .any(|line| line.split_whitespace().nth(4) == Some(target))
+        })
+        .unwrap_or(false)
 }
 
 /// Best-effort mounting of /dev, /proc and /sys.
 ///
-/// Both stages call this; failures are logged but not fatal, because the
-/// kernel may already have mounted them (devtmpfs) or the target may be a
-/// restricted environment. The caller reports more precise errors later.
+/// Both stages call this. A real failure is logged but not fatal here, because
+/// callers report the consequences with more context. `EBUSY` is only ignored
+/// when the target really is a mount point, so a foreign filesystem sitting on
+/// `/dev` is reported instead of being mistaken for devtmpfs.
 pub fn mount_pseudo_fs() {
     let _ = std::fs::create_dir_all("/dev");
     let _ = std::fs::create_dir_all("/proc");
@@ -53,8 +50,15 @@ pub fn mount_pseudo_fs() {
     ];
 
     for (source, target, fstype, flags, data) in entries {
-        if let Err(e) = mount_or_busy(Some(source), target, Some(fstype), flags, data) {
-            crate::warn!("mount {fstype} on {target} failed: {e}");
+        match mount(Some(source), target, Some(fstype), flags, data) {
+            Ok(()) => {}
+            Err(Errno::EBUSY) if is_mountpoint(target) => {
+                crate::info!("{target} is already a mount point; leaving it alone");
+            }
+            Err(Errno::EBUSY) => {
+                crate::warn!("mount {fstype} on {target}: target is busy but is not a mount point");
+            }
+            Err(e) => crate::warn!("mount {fstype} on {target} failed: {e}"),
         }
     }
 }

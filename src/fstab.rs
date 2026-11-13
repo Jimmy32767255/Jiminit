@@ -140,7 +140,7 @@ pub fn parse(text: &str) -> Vec<Entry> {
         }
 
         let device = unescape(fields[0]);
-        let mountpoint = unescape(fields[1]);
+        let raw_mountpoint = unescape(fields[1]);
         let fstype = fields[2].to_ascii_lowercase();
         let options: Vec<String> = fields
             .get(3)
@@ -153,11 +153,17 @@ pub fn parse(text: &str) -> Vec<Entry> {
             })
             .unwrap_or_default();
 
-        if mountpoint == "/" || mountpoint == "none" || device == "none" {
+        if raw_mountpoint == "none" || device == "none" {
             continue;
         }
-        if !mountpoint.starts_with('/') {
-            crate::warn!("fstab: {mountpoint} is not an absolute mountpoint; skipping");
+        let Some(mountpoint) = normalize_mountpoint(&raw_mountpoint) else {
+            crate::warn!(
+                "fstab: {} is not a usable absolute mountpoint; skipping",
+                fields[1]
+            );
+            continue;
+        };
+        if mountpoint == "/" {
             continue;
         }
         if fstype == "swap" || PSEUDO_FILESYSTEMS.contains(&fstype.as_str()) {
@@ -180,6 +186,31 @@ pub fn parse(text: &str) -> Vec<Entry> {
     }
 
     entries
+}
+
+/// Normalize a mount point without touching the filesystem: collapse repeated
+/// slashes and `.` components, resolve `..`, and reject paths that would climb
+/// above `/`. `fstab` normally has clean paths, but `/data/` and `/data` must
+/// not both be mounted, and `/data/../etc` must mean `/etc`.
+fn normalize_mountpoint(value: &str) -> Option<String> {
+    if !value.starts_with('/') {
+        return None;
+    }
+
+    let mut parts: Vec<&str> = Vec::new();
+    for part in value.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+
+    let mut normalized = String::from("/");
+    normalized.push_str(&parts.join("/"));
+    Some(normalized)
 }
 
 /// Read and parse an fstab file; a missing file simply yields no entries.
@@ -282,6 +313,20 @@ proc /proc proc defaults 0 0
         let entries = parse(text);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].device, "/dev/vdb");
+    }
+
+    #[test]
+    fn normalizes_mountpoints_before_deduplicating() {
+        let text = "\
+/dev/vdb /data/ ext4 defaults 0 2
+/dev/vdc /data ext4 defaults 0 2
+/dev/vdd /data/../etc ext4 defaults 0 2
+/dev/vde /../escape ext4 defaults 0 2
+";
+        let entries = parse(text);
+        assert_eq!(entries.len(), 2, "entries: {entries:?}");
+        assert_eq!(entries[0].mountpoint, "/data");
+        assert_eq!(entries[1].mountpoint, "/etc");
     }
 
     #[test]

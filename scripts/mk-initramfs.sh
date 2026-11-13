@@ -49,12 +49,15 @@ foo irq=5
 blacklisted_mod
 baz
 mynet
+blocked_alias
 EOF
     cat > "$ROOT/etc/modprobe.d/test.conf" <<'EOF'
 blacklist blacklisted_mod
+blacklist hidden_mod
 options foo irq=9 timeout=2
 install baz echo "stub-install: baz"
 alias mynet foo
+alias blocked_alias hidden_mod
 EOF
     cat > "$ROOT/sbin/modprobe" <<'EOF'
 #!/bin/sh

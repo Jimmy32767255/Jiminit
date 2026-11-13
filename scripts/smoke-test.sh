@@ -1,20 +1,60 @@
 #!/bin/sh
-# Automated smoke test: boot the VM, verify switch_root + stage2 + shell,
-# then power off and check that QEMU exits. Prints PASS or FAIL.
+# Automated smoke test: boot the VM, log in through getty/login, exercise the
+# control socket (status + runlevel switching), soft reboot, log in again, then
+# power off and check that QEMU exits. Prints PASS or FAIL.
 set -eu
 cd "$(dirname "$0")/.."
 
 LOG=out/smoke.log
 FIFO=out/smoke.fifo
-TIMEOUT=90
+TIMEOUT=120
 
 fail() {
     echo "FAIL: $*" >&2
     if [ -f "$LOG" ]; then
         echo "--- last log lines ---" >&2
-        tail -30 "$LOG" >&2
+        tail -40 "$LOG" >&2
     fi
     exit 1
+}
+
+count() {
+    # grep exits 1 when there are no matches.
+    grep -c "$1" "$LOG" 2>/dev/null || true
+}
+
+wait_for() {
+    pattern=$1
+    limit=$2
+    waited=0
+    while [ "$(count "$pattern")" -lt 1 ]; do
+        waited=$((waited + 1))
+        [ "$waited" -gt "$limit" ] && fail "timed out waiting for: $pattern"
+        sleep 1
+    done
+}
+
+wait_count() {
+    pattern=$1
+    want=$2
+    limit=$3
+    waited=0
+    while [ "$(count "$pattern")" -lt "$want" ]; do
+        waited=$((waited + 1))
+        [ "$waited" -gt "$limit" ] && fail "timed out waiting for $want x: $pattern"
+        sleep 1
+    done
+}
+
+login() {
+    attempt=$1
+    wait_count 'login:' "$attempt" 60
+    printf 'root\n' >"$FIFO"
+    wait_count 'Password:' "$attempt" 20
+    # login flushes typed-ahead input before reading the password.
+    sleep 1
+    printf 'jiminit\n' >"$FIFO"
+    sleep 2
 }
 
 ./scripts/build.sh >/dev/null
@@ -35,26 +75,37 @@ qemu-system-x86_64 \
     -nographic -no-reboot <"$FIFO" >"$LOG" 2>&1 &
 qpid=$!
 
-sleep 10
-if ! kill -0 "$qpid" 2>/dev/null; then
-    fail "QEMU exited before the shell was reached"
-fi
+# 1. Boot to a getty prompt and log in as root.
+login 1
+printf 'jiminit --status\n' >"$FIFO"
+wait_for 'status multi-user' 20
+printf 'id\n' >"$FIFO"
+wait_for 'uid=0(root)' 20
 
-printf 'echo SMOKE-SHELL\nhostname\nkill -USR1 1\n' >"$FIFO"
-
-# The soft reboot stops everything and execs a fresh stage 2; wait for the
-# second boot to reach the point where the shell is about to be spawned.
-waited=0
-while ! grep -q 'soft reboot #1: running stage2 again' "$LOG"; do
-    waited=$((waited + 1))
-    if [ "$waited" -gt 30 ]; then
-        fail "soft reboot did not re-exec stage 2"
-    fi
-    sleep 1
-done
-
+# 2. Switch to single: the login session is stopped and a root shell takes
+#    over the console. The client runs in that dying session, so verify the
+#    switch through the kernel log and the new shell.
+printf 'jiminit --runlevel single &\n' >"$FIFO"
+wait_for 'now in runlevel single' 20
 sleep 1
-printf 'echo AFTER-SOFT-REBOOT\nkill -TERM 1\n' >"$FIFO"
+printf 'echo SINGLE-SHELL-OK\n' >"$FIFO"
+wait_for 'SINGLE-SHELL-OK' 20
+
+# 3. Switch back to multi-user: getty must come back.
+printf 'jiminit --runlevel multi-user &\n' >"$FIFO"
+wait_for 'now in runlevel multi-user' 20
+wait_count 'login:' 2 30
+
+# 4. Log in again and soft reboot: every session is stopped, stage 2 re-execs
+#    and getty comes back.
+login 2
+printf 'kill -USR1 1\n' >"$FIFO"
+wait_count 'running stage2 again' 1 30
+wait_count 'login:' 3 40
+
+# 5. Log in on the new stage 2 and power off.
+login 3
+printf 'kill -TERM 1\n' >"$FIFO"
 
 waited=0
 while kill -0 "$qpid" 2>/dev/null; do
@@ -70,17 +121,22 @@ wait "$qpid" || true
 grep -q 'moved new root onto /' "$LOG" || fail "switch_root did not run"
 grep -q 'stage2: starting as pid 1' "$LOG" || fail "stage2 did not start as PID 1"
 grep -q 'hostname set to jiminit-qemu' "$LOG" || fail "config file was not applied"
-grep -q 'SMOKE-SHELL' "$LOG" || fail "root shell did not run commands"
-grep -q 'svc/ticker: started' "$LOG" || fail "ticker service did not start"
+grep -q 'started getty on /dev/ttyS0' "$LOG" || fail "getty did not start on the serial console"
+grep -q 'status multi-user' "$LOG" || fail "--status did not report the runlevel"
+grep -q 'switching runlevel multi-user -> single' "$LOG" || fail "runlevel switch to single did not happen"
+grep -q 'now in runlevel single' "$LOG" || fail "init did not enter the single runlevel"
+grep -q 'SINGLE-SHELL-OK' "$LOG" || fail "single-user shell did not run commands"
+grep -q 'switching runlevel single -> multi-user' "$LOG" || fail "runlevel switch back did not happen"
+grep -q 'now in runlevel multi-user' "$LOG" || fail "init did not return to multi-user"
+grep -q 'uid=0(root)' "$LOG" || fail "login did not give a root shell"
 grep -q 'svc/ticker: tick' "$LOG" || fail "ticker service output was not forwarded"
-grep -q 'svc/failer: failing' "$LOG" || fail "failer service did not run"
 grep -q 'svc/failer: restarting' "$LOG" || fail "failed service was not restarted"
 grep -q 'SIGUSR1: soft reboot' "$LOG" || fail "SIGUSR1 did not trigger a soft reboot"
 grep -q 'soft reboot #1: exec' "$LOG" || fail "stage 2 was not re-executed"
 grep -q 'soft reboot: fresh tmpfs on /run' "$LOG" || fail "/run was not reset"
 grep -q 'soft reboot: fresh tmpfs on /tmp' "$LOG" || fail "/tmp was not reset"
-grep -q 'AFTER-SOFT-REBOOT' "$LOG" || fail "shell did not come back after the soft reboot"
-[ "$(grep -c 'svc/ticker: started' "$LOG")" -ge 2 ] || fail "services did not restart"
+[ "$(count 'svc/ticker: started')" -ge 2 ] || fail "services did not restart after a runlevel switch/soft reboot"
+[ "$(count 'login:')" -ge 3 ] || fail "getty did not come back after the soft reboot"
 grep -q 'reboot: Power down' "$LOG" || fail "poweroff was not requested"
 
-echo "PASS: switch_root, PID 1, services, soft reboot, shell and poweroff all work"
+echo "PASS: switch_root, PID 1, getty/login, runlevels, services, soft reboot and poweroff all work"

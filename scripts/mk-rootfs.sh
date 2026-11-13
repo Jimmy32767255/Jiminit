@@ -21,16 +21,49 @@ fi
 
 rm -rf "$ROOT"
 mkdir -p "$ROOT/bin" "$ROOT/sbin" "$ROOT/etc" "$ROOT/root" "$ROOT/proc" \
-    "$ROOT/sys" "$ROOT/dev" "$ROOT/tmp" "$ROOT/run" "$ROOT/etc/jiminit/services.d"
+    "$ROOT/sys" "$ROOT/dev" "$ROOT/tmp" "$ROOT/run" "$ROOT/var/run" "$ROOT/var/log" \
+    "$ROOT/etc/jiminit/services.d"
 install -m755 "$OUT/jiminit" "$ROOT/sbin/jiminit"
 ln -sf sbin/jiminit "$ROOT/init"
 install -m755 "$BUSYBOX" "$ROOT/bin/busybox"
 
 for applet in sh mount umount cat ls echo sleep dmesg kill ps free uname \
     hostname date tail head grep wc mkdir rm mv ln sync poweroff reboot halt \
-    ip ifconfig route clear vi less more stty id whoami; do
+    ip ifconfig route clear vi less more stty id whoami;
+do
     ln -sf busybox "$ROOT/bin/$applet"
 done
+# getty/login keep the authentication outside jiminit itself.
+for applet in login passwd sulogin; do
+    ln -sf busybox "$ROOT/bin/$applet"
+done
+ln -sf ../bin/busybox "$ROOT/sbin/getty"
+: > "$ROOT/var/run/utmp"
+
+cat > "$ROOT/etc/passwd" <<'EOF'
+root:x:0:0:root:/root:/bin/sh
+EOF
+
+cat > "$ROOT/etc/group" <<'EOF'
+root:x:0:
+EOF
+
+# Password for root is "jiminit" (SHA-512, salt "jiminit").
+cat > "$ROOT/etc/shadow" <<'EOF'
+root:$6$jiminit$j3JzVbIoJD6GphNRFtqvFj6YmQNmJrc9zO2bt65rgUMHc.dh9c72FY5W2.39vtNz8L3Weey9nYgw1jlPC8FLu0:19000:0:99999:7:::
+EOF
+chmod 600 "$ROOT/etc/shadow"
+
+cat > "$ROOT/etc/securetty" <<'EOF'
+console
+tty1
+tty2
+tty3
+tty4
+tty5
+tty6
+ttyS0
+EOF
 
 cat > "$ROOT/etc/jiminit.toml" <<'EOF'
 # jiminit configuration (all keys optional)
@@ -40,6 +73,12 @@ shell = "/bin/sh"
 respawn = true
 shutdown_timeout_ms = 3000
 init_path = "/sbin/jiminit"
+default_runlevel = "multi-user"
+getty = "/sbin/getty"
+getty_baud = "38400"
+serial_getty_baud = "115200"
+ttys = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
+serial_ttys = ["/dev/ttyS0"]
 EOF
 
 cat > "$ROOT/etc/jiminit/services.d/ticker.toml" <<'EOF'

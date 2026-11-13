@@ -23,6 +23,19 @@ pub struct Config {
     pub init_path: String,
     /// Directory with `*.toml` service definitions.
     pub services_dir: String,
+    /// Runlevel entered at boot: `single`, `multi-user` or `graphical`
+    /// (numeric aliases `1`/`3`/`5` are accepted too).
+    pub default_runlevel: String,
+    /// Program that opens a terminal and prompts for login.
+    pub getty: String,
+    /// Baud rate passed to getty for virtual terminals.
+    pub getty_baud: String,
+    /// Baud rate passed to getty for serial terminals.
+    pub serial_getty_baud: String,
+    /// Virtual terminals that get a getty.
+    pub ttys: Vec<String>,
+    /// Serial terminals that get a getty when the device exists.
+    pub serial_ttys: Vec<String>,
 }
 
 impl Default for Config {
@@ -35,6 +48,12 @@ impl Default for Config {
             shutdown_timeout_ms: 3000,
             init_path: "/sbin/jiminit".to_string(),
             services_dir: crate::service::DEFAULT_DIR.to_string(),
+            default_runlevel: "multi-user".to_string(),
+            getty: "/sbin/getty".to_string(),
+            getty_baud: "38400".to_string(),
+            serial_getty_baud: "115200".to_string(),
+            ttys: (1..=6).map(|n| format!("/dev/tty{n}")).collect(),
+            serial_ttys: vec!["/dev/ttyS0".to_string()],
         }
     }
 }
@@ -75,6 +94,10 @@ mod tests {
         assert_eq!(cfg.shutdown_timeout_ms, 3000);
         assert_eq!(cfg.init_path, "/sbin/jiminit");
         assert_eq!(cfg.services_dir, "/etc/jiminit/services.d");
+        assert_eq!(cfg.default_runlevel, "multi-user");
+        assert_eq!(cfg.getty, "/sbin/getty");
+        assert_eq!(cfg.ttys.len(), 6);
+        assert_eq!(cfg.serial_ttys, ["/dev/ttyS0"]);
     }
 
     #[test]
@@ -95,16 +118,21 @@ shell = "/bin/sh"
 respawn = true
 shutdown_timeout_ms = 1500
 init_path = "/sbin/jiminit"
+default_runlevel = "graphical"
+ttys = ["/dev/ttyS0"]
 "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.console, "/dev/ttyS0");
         assert_eq!(cfg.shutdown_timeout_ms, 1500);
+        assert_eq!(cfg.default_runlevel, "graphical");
         assert_eq!(
             cfg,
             Config {
                 hostname: "jiminit-qemu".into(),
                 console: "/dev/ttyS0".into(),
                 shutdown_timeout_ms: 1500,
+                default_runlevel: "graphical".into(),
+                ttys: vec!["/dev/ttyS0".into()],
                 ..Config::default()
             }
         );

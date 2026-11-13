@@ -205,7 +205,8 @@ fn gpt_lookup(file: &File, header: &GptHeader, want: &str) -> Option<usize> {
     }
     let count = header.entry_count.min(128) as usize;
     let mut entries = vec![0u8; count * header.entry_size as usize];
-    file.read_exact_at(&mut entries, header.entries_lba * 512).ok()?;
+    file.read_exact_at(&mut entries, header.entries_lba * 512)
+        .ok()?;
 
     for index in 0..count {
         let offset = index * header.entry_size as usize;
@@ -331,7 +332,10 @@ mod tests {
 
     #[test]
     fn partition_names() {
-        assert_eq!(partition_path(Path::new("/dev/vda"), 2), PathBuf::from("/dev/vda2"));
+        assert_eq!(
+            partition_path(Path::new("/dev/vda"), 2),
+            PathBuf::from("/dev/vda2")
+        );
         assert_eq!(
             partition_path(Path::new("/dev/nvme0n1"), 3),
             PathBuf::from("/dev/nvme0n1p3")

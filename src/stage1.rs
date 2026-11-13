@@ -27,11 +27,8 @@ pub fn run() -> Result<()> {
         "resolving root={root_spec} (fstype={}, read_only={read_only})",
         fstype.unwrap_or("auto")
     );
-    let device = crate::rootdev::resolve_with_retry(
-        root_spec,
-        20,
-        std::time::Duration::from_millis(250),
-    )?;
+    let device =
+        crate::rootdev::resolve_with_retry(root_spec, 20, std::time::Duration::from_millis(250))?;
     crate::info!("root device resolved to {}", device.display());
 
     std::fs::create_dir_all("/newroot").context("create /newroot")?;

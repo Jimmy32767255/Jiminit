@@ -4,7 +4,8 @@
 
 当前功能：作为 initramfs 的 `/init` 挂载真实根并 `switch_root`，也能直接作为系统根上的
 `init=` 使用；挂载伪文件系统、设置 hostname、按依赖启动并看护 `/etc/jiminit/services.d`
-里的服务、在 console 上提供 root shell、回收孤儿进程，并在收到信号时有序关机/重启。
+里的服务、在多个 tty 上拉起 getty 交由外部 login 认证、支持运行级切换、回收孤儿进程，
+并在收到信号时有序关机/重启。
 
 ## 目录结构
 
@@ -12,7 +13,8 @@
 src/
   main.rs     入口：判定 stage1/stage2，panic 兜底进入 rescue
   stage1.rs   initramfs 阶段：解析 root=、挂载真实根、switch_root
-  stage2.rs   真实根阶段：PID 1 主循环（服务、shell、收尸、信号、关机）
+  stage2.rs   真实根阶段：PID 1 主循环（服务、getty/login、收尸、信号、关机）
+  runlevel.rs single / multi-user / graphical 运行级与数字别名
   service.rs  服务监督：TOML 解析、依赖拓扑、重启退避、日志转发、停机
   rootdev.rs  根设备解析：/dev 路径、UUID=、PARTUUID=
   config.rs   /etc/jiminit.toml 配置
@@ -53,21 +55,56 @@ scripts/
 ### stage2（PID 1）
 
 1. 挂载伪文件系统，读取 `/etc/jiminit.toml`（缺失则全部用默认值）；
-2. `sethostname`，接管 console（`setsid` + `TIOCSCTTY` + dup2 到 0/1/2）；
-3. 阻塞信号并创建 `signalfd`，主循环用 `poll` 等待信号、服务输出或 100ms 超时；
-4. 加载 `/etc/jiminit/services.d/*.toml`，按依赖关系启动服务；
-5. fork 登录 shell（argv0 带 `-` 前缀），shell 退出时按配置 respawn（否则关机）；
-6. 每次唤醒回收所有子进程：服务退出交给监督器处理，其他孤儿只记录；
-7. `SIGINT`（ctrl-alt-del）：重启；`SIGTERM`：关机；`SIGUSR1`：软重启；
-8. 关机流程：SIGHUP 结束 shell → 按启动逆序给服务发 SIGTERM → 等待
+2. `sethostname`，把 console dup2 到 0/1/2；PID 1 自己不 `TIOCSCTTY`，控制终端留给
+   各登录会话（getty/login/shell 各自 `setsid` + `TIOCSCTTY`）；
+3. 阻塞信号并创建 `signalfd`，主循环用 `poll` 等待信号、服务输出、控制 socket 或
+   100ms 超时；
+4. 按 `default_runlevel` 选出属于该级的服务，加载 `/etc/jiminit/services.d/*.toml`
+   并按依赖关系启动；
+5. 非 single 级：为 `ttys` / `serial_ttys` 里每个存在的终端 fork 一个 getty，认证交给
+   外部 `login`；getty 退出后 500ms 重新拉起。single 级：直接在 console 上 fork 一个
+   root shell（argv0 带 `-` 前缀），退出后按 `respawn` 决定是否重新拉起；
+6. 每次唤醒回收所有子进程：服务退出交给监督器，getty 退出触发重拉，其他孤儿只记录；
+7. 监听 `/run/jiminit.sock`，接受 `status` 与 `runlevel <name>` 请求（见下文）；
+8. `SIGINT`（ctrl-alt-del）：重启；`SIGTERM`：关机；`SIGUSR1`：软重启；
+9. 关机流程：SIGHUP 结束所有 getty/单用户 shell → 按启动逆序给服务发 SIGTERM → 等待
    `shutdown_timeout_ms` → 剩余进程 SIGKILL → `sync` → 根重新挂载为只读 →
    `reboot(RB_POWER_OFF | RB_AUTOBOOT)`；
-9. 软重启复用同一段停机流程，但在 `sync` 之后：给 `/run`、`/tmp` 各挂一个新的
-   tmpfs（先 `MNT_DETACH` 原有挂载）→ `execve` 自己（`/proc/self/exe --stage2`，
-   环境里带 `JIMINIT_SOFT_REBOOTS=n+1`）→ 新 stage2 重新读配置、起服务、起 shell。
-   因为不经过内核，PID 仍为 1；exec 失败则进入 rescue shell，而不是让机器卡死。
+10. 软重启复用同一段停机流程，但在 `sync` 之后：给 `/run`、`/tmp` 各挂一个新的
+    tmpfs（先 `MNT_DETACH` 原有挂载）→ `execve` 自己（`/proc/self/exe --stage2`，
+    环境里带 `JIMINIT_SOFT_REBOOTS=n+1`）→ 新 stage2 重新读配置、起服务、起 getty。
+    因为不经过内核，PID 仍为 1；exec 失败则进入 rescue shell，而不是让机器卡死。
 
 任何阶段出错或 panic 都不会让 PID 1 退出，而是进入 rescue shell 循环。
+
+## 登录与运行级
+
+jiminit 只负责拉起 getty 和处理运行级，用户名/密码校验完全交给外部 `login`
+（测试镜像是 busybox 的 `getty`/`login`）。默认在 `/dev/tty1`–`/dev/tty6` 和
+`/dev/ttyS0`（存在时）各起一个 getty，波特率分别由 `getty_baud`、
+`serial_getty_baud` 指定。
+
+三个运行级：
+
+| 名称 | 数字别名 | 内容 |
+| --- | --- | --- |
+| `single` | 1 | 只有显式标了 `runlevels = ["single"]` 的服务及其依赖；console 上是 root shell，不起 getty |
+| `multi-user` | 3 | 默认级；未标 `runlevels` 的服务都算在内；getty 提供登录 |
+| `graphical` | 5 | 同 multi-user，另加标了 `graphical` 的服务；jiminit 本身不启动图形界面 |
+
+服务可用 `runlevels = ["single"]` 或 `["multi-user", "graphical"]` 标注归属；
+未标注等价于 `["multi-user", "graphical"]`。切换级别时，不属于新级别的服务会先
+停掉（SIGTERM，3s 后 SIGKILL），属于新级别但尚未运行的再启动；登录会话同样先结束，
+避免新旧 shell 争抢 console 的控制终端。
+
+运行中的 init 可通过控制 socket 查询和切换（`/run/jiminit.sock`）：
+
+```sh
+jiminit --status                # 输出 status multi-user
+jiminit --runlevel single       # 切到单用户，原登录会话会被结束
+jiminit --runlevel 3            # 数字别名
+jiminit --runlevel reboot       # 6 / reboot 触发重启；0 / poweroff / halt 触发关机
+```
 
 ## 服务（`/etc/jiminit/services.d`）
 
@@ -82,6 +119,7 @@ restart = "on-failure"      # always | on-failure | never（默认 on-failure）
 oneshot = false             # true 表示跑完就结束、不重启
 working_dir = "/"           # 工作目录，默认 /
 env = { FOO = "bar" }       # 额外环境变量
+runlevels = ["multi-user"]  # 默认 ["multi-user", "graphical"]
 ```
 
 启动语义：
@@ -92,6 +130,7 @@ env = { FOO = "bar" }       # 额外环境变量
   `/dev/kmsg`，每行带 `svc/<name>: ` 前缀；
 - 退出后按策略重启：连续失败从 1s 开始指数退避（2s、4s…上限 60s），连续 5 次失败后
   放弃并告警；连续运行满 10s 会重置失败计数；
+- 只有当前运行级（以及依赖它的服务所在级）的成员才会被启动，见上一节；
 - 关机时按启动逆序发 SIGTERM，超时后 SIGKILL。
 
 ## 配置文件
@@ -102,10 +141,16 @@ env = { FOO = "bar" }       # 额外环境变量
 hostname = "jiminit"
 console  = "/dev/console"
 shell    = "/bin/sh"
-respawn  = true                    # root shell 退出后是否重新拉起
+respawn  = true                    # single 级 root shell 退出后是否重新拉起
 shutdown_timeout_ms = 3000         # 关机时等待 SIGTERM 的时长
 init_path = "/sbin/jiminit"        # stage2 可执行文件路径
 services_dir = "/etc/jiminit/services.d"
+default_runlevel = "multi-user"    # single | multi-user | graphical（或 1/3/5）
+getty = "/sbin/getty"              # getty 程序（认证由它 exec 的 login 完成）
+getty_baud = "38400"               # VT getty 波特率
+serial_getty_baud = "115200"       # 串口 getty 波特率
+ttys = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
+serial_ttys = ["/dev/ttyS0"]       # 不存在的设备会被跳过
 ```
 
 ## 构建与测试
@@ -134,16 +179,21 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 
 - initramfs → 挂载 `/dev/vda` → MS_MOVE 切换根 → stage2 以 PID 1 运行；
 - 读取 `/etc/jiminit.toml`（hostname 生效）、`/proc/1/comm` 为 `jiminit`；
-- root shell 可交互，`tty` 为 `/dev/console`；shell `exit` 后自动 respawn；
+- 串口 console 上出现 `jiminit-qemu login:`，用 root/`jiminit` 经 busybox `login`
+  登录后得到 root shell（`id` 显示 `uid=0(root)`）；默认还在 tty1–tty6 起了 getty；
 - 服务：`ticker` 每秒输出并被转发到 kmsg（`svc/ticker: tick`）；
   `failer` 退出码 1 后按 1s→2s→4s 退避重启；关机时 `ticker` 收到 SIGTERM 退出；
-- `kill -TERM 1` → `reboot: Power down`，QEMU 正常退出（shell 用 SIGHUP 结束，
+- `jiminit --status` 返回 `status multi-user`；
+- `jiminit --runlevel single` → 停 getty/ticker → `now in runlevel single`，
+  console 上出现单用户 root shell；`jiminit --runlevel multi-user` → 重新起 getty，
+  可以再次登录；
+- `kill -TERM 1` → `reboot: Power down`，QEMU 正常退出（登录会话用 SIGHUP 结束，
   不再等满超时）；
 - `kill -INT 1` → `reboot: Restarting system`；
 - `kill -USR1 1` → `SIGUSR1: soft reboot` → 停机 → `fresh tmpfs on /run`、
   `/tmp` → `soft reboot #1: exec /sbin/jiminit --stage2` → 再次以 PID 1 启动、
-  服务与 shell 全部重新拉起（日志里 `svc/ticker: started` 出现两次）；
-  之后再 `kill -TERM 1` 正常 `Power down`；
+  服务与 getty 全部重新拉起并出现新的 login 提示；之后再登录并 `kill -TERM 1`
+  正常 `Power down`；
 - `root=UUID=<fs-uuid>`、`root=PARTUUID=<gpt-partition-guid>` 均能定位设备
   （GPT 分区测试得到 `/dev/vda1`）。
 
@@ -151,7 +201,10 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 
 - 不加载内核模块，因此只能用内建的文件系统和磁盘驱动（真实 initramfs 需要在这里加模块加载）；
 - 不做 fsck，不处理 `/etc/fstab`；
-- 没有 getty/login，root shell 是唯一交互入口；没有运行级（runlevel）概念；
+- jiminit 不内置认证：没有 PAM，也不解析 `/etc/shadow`，完全依赖外部 `login`
+  （测试镜像里是 busybox）；替换成 util-linux login/agetty 时应同样可用；
+- 运行级只有三个固定级别，没有 SysV 的任意 rcN.d 脚本目录，也没有 inittab；
+- VT 之间切换只能靠内核快捷键，jiminit 不处理 `chvt`/键盘；
 - 服务没有就绪探测（没有 sd_notify 之类），依赖只保证启动顺序；
 - 服务没有 cgroup 隔离，也不切换用户/组运行；
 - 只支持 x86_64 上验证过的路径，其他架构未测试；
@@ -168,5 +221,6 @@ switch_root、signalfd 主循环、服务监督）都自己实现，便于后续
 PID 1 主循环用 `signalfd` + `poll` 而不是线程，避免在多线程进程里 fork 的风险；
 服务日志通过管道回到主循环带前缀写入 kmsg，同样不需要额外线程。
 
-具体决策点（QEMU 验证、TOML 配置、root shell、init 接管关机、UUID/PARTUUID、
-服务格式/依赖启动/重启策略/日志去向）都是和需求方逐项确认后定下的。
+具体决策点（QEMU 验证、TOML 配置、init 接管关机、UUID/PARTUUID、服务格式/依赖启动/
+重启策略/日志去向、getty+外部 login、三个命名运行级、控制 socket 切换）都是和需求方
+逐项确认后定下的。

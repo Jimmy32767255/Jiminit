@@ -29,9 +29,27 @@ pub fn mount_pseudo_fs() {
     let _ = std::fs::create_dir_all("/sys");
 
     let entries: [(&str, &str, &str, MsFlags, Option<&str>); 3] = [
-        ("devtmpfs", "/dev", "devtmpfs", MsFlags::MS_NOSUID, Some("mode=0755")),
-        ("proc", "/proc", "proc", MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV, None),
-        ("sysfs", "/sys", "sysfs", MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV, None),
+        (
+            "devtmpfs",
+            "/dev",
+            "devtmpfs",
+            MsFlags::MS_NOSUID,
+            Some("mode=0755"),
+        ),
+        (
+            "proc",
+            "/proc",
+            "proc",
+            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+            None,
+        ),
+        (
+            "sysfs",
+            "/sys",
+            "sysfs",
+            MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+            None,
+        ),
     ];
 
     for (source, target, fstype, flags, data) in entries {
@@ -43,7 +61,13 @@ pub fn mount_pseudo_fs() {
 
 /// Move an existing mount point to a new location (used before switch_root).
 pub fn mount_move(source: &str, target: &str) -> Result<(), Errno> {
-    mount(Some(source), target, None::<&str>, MsFlags::MS_MOVE, None::<&str>)
+    mount(
+        Some(source),
+        target,
+        None::<&str>,
+        MsFlags::MS_MOVE,
+        None::<&str>,
+    )
 }
 
 /// Atomically move the new root onto `/` (the classic switch_root trick).

@@ -3,8 +3,10 @@
 //! Two modes:
 //! * initramfs stage 1 (`root=` on the kernel command line): mount the real
 //!   root and switch_root into it.
-//! * root stage 2 (PID 1 on the final root): hostname, console, root shell,
-//!   service supervision, reaping and shutdown.
+//! * root stage 2 (PID 1 on the final root): hostname, console, getty/login,
+//!   service supervision, runlevel switching, reaping and shutdown.
+//! * a small client (`jiminit --status` / `--runlevel NAME`) that talks to the
+//!   running init over /run/jiminit.sock.
 //!
 //! PID 1 must never exit, so every failure ends up in a rescue shell loop.
 
@@ -13,11 +15,15 @@ mod config;
 mod log;
 mod mount;
 mod rootdev;
+mod runlevel;
 mod service;
 mod stage1;
 mod stage2;
 
 use std::ffi::CString;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -28,6 +34,10 @@ enum Stage {
 }
 
 fn main() {
+    if let Some(code) = client() {
+        std::process::exit(code);
+    }
+
     log::init();
     mount::mount_pseudo_fs();
 
@@ -46,6 +56,53 @@ fn main() {
     }
 
     stage2::rescue();
+}
+
+/// Handle the one-shot client commands. Returns `None` for the init itself.
+fn client() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let request = match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["--status"] => "status".to_string(),
+        ["--runlevel", level] => format!("runlevel {level}"),
+        _ => return None,
+    };
+    Some(run_client(&request))
+}
+
+fn run_client(request: &str) -> i32 {
+    let path = stage2::CONTROL_PATH;
+    let mut stream = match UnixStream::connect(path) {
+        Ok(stream) => stream,
+        Err(e) => {
+            eprintln!("jiminit: cannot connect to {path}: {e} (is jiminit running as pid 1?)");
+            return 1;
+        }
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        eprintln!("jiminit: cannot send to {path}: {e}");
+        return 1;
+    }
+
+    let mut reply = String::new();
+    if let Err(e) = stream.read_to_string(&mut reply) {
+        eprintln!("jiminit: no reply from init: {e}");
+        return 1;
+    }
+    // The session may be hung up while the reply is on the way (a runlevel
+    // switch stops the session that asked for it), so ignore write errors.
+    let _ = std::io::stdout().write_all(reply.as_bytes());
+    if reply.starts_with("error") {
+        1
+    } else {
+        0
+    }
 }
 
 fn detect_stage() -> Stage {

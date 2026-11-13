@@ -6,6 +6,7 @@
 //! startup order during shutdown. Their stdout/stderr is forwarded to the
 //! kernel log with a `svc/<name>: ` prefix.
 
+use crate::runlevel::Level;
 use anyhow::{bail, Context, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::WaitStatus;
@@ -47,6 +48,9 @@ pub struct ServiceSpec {
     pub oneshot: bool,
     pub working_dir: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// Runlevels in which this service should run. Empty in the file means
+    /// `multi-user` + `graphical`.
+    pub runlevels: Vec<Level>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -59,6 +63,32 @@ struct ServiceFile {
     oneshot: bool,
     working_dir: Option<String>,
     env: BTreeMap<String, String>,
+    runlevels: Vec<String>,
+}
+
+fn default_runlevels() -> Vec<Level> {
+    vec![Level::MultiUser, Level::Graphical]
+}
+
+fn parse_runlevels(name: &str, values: &[String]) -> Result<Vec<Level>> {
+    if values.is_empty() {
+        return Ok(default_runlevels());
+    }
+    let mut levels = Vec::new();
+    for value in values {
+        match Level::parse(value) {
+            Some(level) => {
+                if !levels.contains(&level) {
+                    levels.push(level);
+                }
+            }
+            None => bail!(
+                "service `{name}` has unknown runlevel `{value}` \
+                 (use single, multi-user or graphical)"
+            ),
+        }
+    }
+    Ok(levels)
 }
 
 /// Parse one service definition. `name` is the file stem.
@@ -88,6 +118,7 @@ pub fn parse_service(name: &str, text: &str) -> Result<ServiceSpec> {
         oneshot: file.oneshot,
         working_dir: file.working_dir,
         env: file.env,
+        runlevels: parse_runlevels(name, &file.runlevels)?,
     })
 }
 
@@ -157,6 +188,27 @@ fn startup_order(services: &[ServiceSpec]) -> (Vec<usize>, Vec<String>) {
     (order, cyclic)
 }
 
+/// Services that should run at `level`: tagged services plus their
+/// dependencies, transitively.
+fn members_of(services: &[ServiceSpec], level: Level) -> BTreeSet<usize> {
+    let mut selected = BTreeSet::new();
+    let mut queue: Vec<String> = Vec::new();
+    for (idx, spec) in services.iter().enumerate() {
+        if spec.runlevels.contains(&level) {
+            selected.insert(idx);
+            queue.extend(spec.depends_on.iter().cloned());
+        }
+    }
+    while let Some(name) = queue.pop() {
+        if let Some(idx) = services.iter().position(|spec| spec.name == name) {
+            if selected.insert(idx) {
+                queue.extend(services[idx].depends_on.iter().cloned());
+            }
+        }
+    }
+    selected
+}
+
 struct Running {
     idx: usize,
     started: Instant,
@@ -181,12 +233,13 @@ pub struct Supervisor {
     pending: Vec<PendingRestart>,
     logs: Vec<LogPipe>,
     stopping: bool,
+    level: Level,
 }
 
 impl Supervisor {
     /// Load services from `dir`. Broken definitions and cycles are logged and
     /// skipped; an unusable directory simply yields no services.
-    pub fn new(dir: &Path) -> Self {
+    pub fn new(dir: &Path, level: Level) -> Self {
         let mut services = match load_dir(dir) {
             Ok(services) => services,
             Err(e) => {
@@ -198,7 +251,10 @@ impl Supervisor {
         let known: BTreeSet<String> = services.iter().map(|s| s.name.clone()).collect();
         services.retain(|spec| {
             if let Some(missing) = spec.depends_on.iter().find(|d| !known.contains(*d)) {
-                crate::warn!("svc/{}: depends on unknown service `{missing}`; skipping", spec.name);
+                crate::warn!(
+                    "svc/{}: depends on unknown service `{missing}`; skipping",
+                    spec.name
+                );
                 false
             } else {
                 true
@@ -225,38 +281,83 @@ impl Supervisor {
             pending: Vec::new(),
             logs: Vec::new(),
             stopping: false,
+            level,
         }
     }
 
-    /// Start everything that can start, repeating until no further service's
-    /// dependencies have been launched. That gives independent services a
-    /// parallel start without waiting on each other.
-    pub fn start_all(&mut self) {
-        let mut launched: BTreeSet<String> = BTreeSet::new();
-        loop {
-            let mut started_any = false;
-            for idx in 0..self.services.len() {
-                let (name, deps) = {
-                    let spec = &self.services[idx];
-                    (spec.name.clone(), spec.depends_on.clone())
-                };
-                if launched.contains(&name) || !deps.iter().all(|d| launched.contains(d)) {
-                    continue;
+    /// Indices of services that belong to `level`: those tagged for it plus
+    /// their dependencies (a dependency shared with another level still has
+    /// to run when the dependent runs).
+    fn members(&self) -> BTreeSet<usize> {
+        members_of(&self.services, self.level)
+    }
+
+    fn is_running(&self, idx: usize) -> bool {
+        self.running.values().any(|run| run.idx == idx)
+    }
+
+    /// Start every member of the current runlevel that is not running yet.
+    /// The vector is already in dependency order, so a single pass suffices.
+    pub fn start_members(&mut self) {
+        let members = self.members();
+        for idx in 0..self.services.len() {
+            if members.contains(&idx) && !self.is_running(idx) {
+                let name = self.services[idx].name.clone();
+                if let Err(e) = self.spawn(idx, 0) {
+                    crate::err!("svc/{name}: cannot start: {e:#}");
                 }
-                match self.spawn(idx, 0) {
-                    Ok(()) => {
-                        launched.insert(name);
-                        started_any = true;
-                    }
-                    Err(e) => crate::err!("svc/{name}: cannot start: {e:#}"),
-                }
-            }
-            if !started_any {
-                break;
             }
         }
     }
 
+    /// Switch to `level`: stop services that no longer belong, drop their
+    /// pending restarts and remember the new level so exits do not restart
+    /// them. Starting the new members is a separate step so callers can wait
+    /// for the old ones to exit first.
+    pub fn set_level(&mut self, level: Level) {
+        if level == self.level {
+            return;
+        }
+        crate::info!(
+            "svc: runlevel {self_level} -> {level}",
+            self_level = self.level
+        );
+        self.level = level;
+        let members = self.members();
+        self.pending
+            .retain(|restart| members.contains(&restart.idx));
+
+        let mut stopping: Vec<(usize, Pid)> = self
+            .running
+            .iter()
+            .filter(|(_, run)| !members.contains(&run.idx))
+            .map(|(pid, run)| (run.idx, *pid))
+            .collect();
+        stopping.sort_by_key(|(idx, _)| std::cmp::Reverse(*idx));
+        for (idx, pid) in stopping {
+            crate::info!(
+                "svc/{}: stopping for runlevel change (SIGTERM)",
+                self.services[idx].name
+            );
+            let _ = kill(Pid::from_raw(-pid.as_raw()), Signal::SIGTERM);
+        }
+    }
+
+    /// PIDs that are running but do not belong to the current runlevel.
+    pub fn stopping_pids(&self) -> Vec<Pid> {
+        let members = self.members();
+        self.running
+            .iter()
+            .filter(|(_, run)| !members.contains(&run.idx))
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    pub fn any_running(&self, pids: &[Pid]) -> bool {
+        pids.iter().any(|pid| self.running.contains_key(pid))
+    }
+
+    /// SIGKILL the given service process groups.
     /// Spawn due restarts. Called from the main loop on every wakeup.
     pub fn tick(&mut self) {
         if self.stopping || self.pending.is_empty() {
@@ -325,6 +426,11 @@ impl Supervisor {
 
         crate::info!("svc/{}: {} after {:?}", spec.name, describe(status), uptime);
 
+        // A service stopped because of a runlevel switch must not come back.
+        if !self.members().contains(&run.idx) {
+            return true;
+        }
+
         if self.stopping || spec.oneshot {
             return true;
         }
@@ -382,9 +488,7 @@ impl Supervisor {
                 let raw = pipe.fd.as_raw_fd();
                 loop {
                     let mut chunk = [0u8; 4096];
-                    let n = unsafe {
-                        libc::read(raw, chunk.as_mut_ptr().cast(), chunk.len())
-                    };
+                    let n = unsafe { libc::read(raw, chunk.as_mut_ptr().cast(), chunk.len()) };
                     if n > 0 {
                         pipe.buf.extend_from_slice(&chunk[..n as usize]);
                     } else if n == 0 {
@@ -476,12 +580,7 @@ fn pipe_cloexec() -> Result<(OwnedFd, OwnedFd)> {
     if rc < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    Ok(unsafe {
-        (
-            OwnedFd::from_raw_fd(fds[0]),
-            OwnedFd::from_raw_fd(fds[1]),
-        )
-    })
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
 fn set_nonblocking(fd: &OwnedFd) {
@@ -538,7 +637,7 @@ fn child_exec(spec: &ServiceSpec, log_fd: OwnedFd) -> ! {
 
 /// Clear the inherited signal mask (`SIG_SETMASK` with an empty set).
 fn clear_signal_mask() {
-    use nix::sys::signal::{sigprocmask, SigmaskHow, SigSet};
+    use nix::sys::signal::{sigprocmask, SigSet, SigmaskHow};
     let empty = SigSet::empty();
     let _ = sigprocmask(SigmaskHow::SIG_SETMASK, Some(&empty), None);
 }
@@ -595,6 +694,7 @@ mod tests {
             oneshot: false,
             working_dir: None,
             env: BTreeMap::new(),
+            runlevels: vec![Level::MultiUser, Level::Graphical],
         }
     }
 
@@ -662,6 +762,45 @@ oneshot = true
         let mut cyclic = cyclic;
         cyclic.sort();
         assert_eq!(cyclic, ["a", "b"]);
+    }
+
+    #[test]
+    fn runlevels_default_to_multi_user_and_graphical() {
+        let svc = parse_service("demo", "exec = \"/bin/true\"\n").unwrap();
+        assert_eq!(svc.runlevels, vec![Level::MultiUser, Level::Graphical]);
+    }
+
+    #[test]
+    fn runlevels_accept_names_and_numeric_aliases() {
+        let text = "exec = \"/bin/true\"\nrunlevels = [\"single\", \"5\"]\n";
+        let svc = parse_service("demo", text).unwrap();
+        assert_eq!(svc.runlevels, vec![Level::Single, Level::Graphical]);
+    }
+
+    #[test]
+    fn rejects_unknown_runlevel_tag() {
+        let text = "exec = \"/bin/true\"\nrunlevels = [\"graphics\"]\n";
+        assert!(parse_service("demo", text).is_err());
+    }
+
+    #[test]
+    fn single_level_only_keeps_tagged_services_and_their_deps() {
+        let mut services = vec![spec("web", &["db"]), spec("db", &[]), spec("console", &[])];
+        services[2].runlevels = vec![Level::Single];
+        let single = members_of(&services, Level::Single);
+        assert_eq!(single, BTreeSet::from([2]));
+        let graphical = members_of(&services, Level::Graphical);
+        // `console` was retagged to single only, so it is not a member here.
+        assert_eq!(graphical, BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn dependencies_are_pulled_into_the_level() {
+        let mut services = vec![spec("web", &["db"]), spec("db", &[])];
+        services[0].runlevels = vec![Level::Single];
+        services[1].runlevels = vec![Level::MultiUser];
+        let single = members_of(&services, Level::Single);
+        assert_eq!(single, BTreeSet::from([0, 1]));
     }
 
     #[test]

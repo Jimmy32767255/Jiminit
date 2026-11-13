@@ -1,0 +1,27 @@
+[package]
+name = "jiminit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "A personal experimental GNU/Linux init system"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+nix = { version = "0.30", features = [
+    "fs",
+    "hostname",
+    "mount",
+    "process",
+    "reboot",
+    "sched",
+    "signal",
+] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

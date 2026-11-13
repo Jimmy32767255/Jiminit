@@ -127,7 +127,7 @@ if [ "$qemu_rc" -ne 0 ]; then
     fail "qemu exited with status $qemu_rc"
 fi
 
-grep -q 'moved new root onto /' "$LOG" || fail "switch_root did not run"
+grep -q 'pivot_root: switched to the new root' "$LOG" || fail "pivot_root did not run"
 grep -q 'stub-modprobe: virtio_blk' "$LOG" || fail "modules were not loaded before the root was resolved"
 grep -q 'stub-modprobe: foo irq=5' "$LOG" || fail "/etc/modules parameters were not passed to modprobe"
 grep -q 'stub-modprobe: blacklisted_mod' "$LOG" || fail "an explicitly listed module was skipped because of a blacklist"

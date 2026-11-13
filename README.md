@@ -19,6 +19,7 @@ src/
   service.rs  服务监督：TOML 解析、依赖拓扑、重启退避、日志转发、停机
   rootdev.rs  根设备解析：/dev 路径、UUID=、PARTUUID=
   modules.rs  /etc/modules + modprobe.d 规则，加载根设备所需的内核模块
+  coldplug.rs 扫描 /sys 的 modalias，用 modprobe 自动加载已发现设备的驱动
   fstab.rs    /etc/fstab 解析（switch_root 前挂载额外文件系统）
   crypttab.rs /etc/crypttab 解析
   luks.rs     cryptsetup 解锁（重试 3 次）
@@ -32,6 +33,9 @@ scripts/
   mk-rootfs.sh     生成 ext4 根镜像（jiminit + busybox + 配置 + 示例服务）
   run-qemu.sh      交互式启动测试
   smoke-test.sh    自动冒烟测试
+  mk-usr-image.sh  /usr 独立分区的镜像
+  smoke-usr-test.sh /usr 独立分区 + pivot_root 测试
+  smoke-real-test.sh coldplug + 真实 e2fsck 测试
   mk-luks-image.sh LUKS + LVM 根镜像（需要 root）
   smoke-luks-test.sh LUKS/LVM 自动冒烟测试
 ```
@@ -52,7 +56,9 @@ scripts/
    modprobe 或任一模块加载失败都会中止启动、进入 rescue。`blacklist` 与 modprobe(8)
    一致，只拦截 alias 解析——显式写在 `/etc/modules` 里的模块仍会加载（否则被
    blacklist 的存储驱动会让根设备直接不可达），单条 modprobe/install 命令超过 30s
-   会被杀掉并判定失败；
+   会被杀掉并判定失败；随后扫描 `/sys/bus/*/devices/*/modalias`，去重后逐个
+   `modprobe -q <modalias>`，让内核已发现设备的驱动自动加载；这一步是尽力而为，
+   modprobe 不存在或某个 alias 没有对应模块都只记日志、不阻塞启动；
 3. 按 initramfs 里的 `/etc/crypttab` 逐个解锁 LUKS 容器（`name device keyfile
    options`，`keyfile` 为 `none`/`-` 时交互输入口令）。设备名支持 `/dev/*`、`UUID=`、
    `PARTUUID=`；每个容器最多尝试 3 次，仍失败则中止启动进入 rescue。`options` 只识别
@@ -78,9 +84,12 @@ scripts/
    该可执行文件存在；
 10. 把 `/dev`、`/proc`、`/sys` 的挂载点 MS_MOVE 进新根；移动失败时若目标已经是挂载点
    则记 info，否则中止启动；
-11. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
-   （与 busybox switch_root 相同的收尾，缺 `chroot(".")` 会导致后续 exec 仍看旧根）；
-12. `execve("/sbin/jiminit", ["--stage2"])`。
+11. `chdir("/newroot")` → `pivot_root(".", ".")` → `umount2(".", MNT_DETACH)` →
+   `chdir("/")`：新根的整棵挂载树（包括 fstab 挂进来的 `/usr` 等）成为 `/`，旧
+   initramfs 根被摘掉。内核拒绝 pivot_root（例如挂载传播是 shared）时回退到
+   `MS_MOVE` + `chroot(".")` 的老路径；
+12. `execve("/sbin/jiminit", ["--stage2"])`（`init_path` 来自真实根的配置，可以指向
+   `/usr/sbin/jiminit`；指向 `/usr/...` 但 `/usr` 没挂上时会给出明确错误）。
 
 ### stage2（PID 1）
 
@@ -202,6 +211,14 @@ shell；只有文件缺失才使用全默认值。rescue shell 自己则用 `loa
 ./scripts/run-qemu.sh        # 交互式启动（ctrl-a x 退出）
 ./scripts/smoke-test.sh      # 自动验证并输出 PASS/FAIL
 
+# 可选组件用环境变量打进 initramfs（默认为最小镜像）
+FSCK=1 ./scripts/mk-initramfs.sh      # 打包 e2fsprogs，fsck -p 真正执行
+COLDPLUG=1 ./scripts/mk-initramfs.sh  # kmod modprobe + 存储/文件系统模块
+./scripts/smoke-real-test.sh          # coldplug + 真实 e2fsck 冒烟
+
+# /usr 独立分区：fstab 按 UUID 挂载，pivot_root 后从 /usr/sbin/jiminit 启动
+./scripts/smoke-usr-test.sh
+
 # LUKS + LVM 根：先以普通用户构建 rootfs，再用 root 造磁盘
 ./scripts/build.sh && ./scripts/mk-rootfs.sh
 qt-sudo ./scripts/mk-luks-image.sh   # out/luks.img + out/crypttab
@@ -244,6 +261,10 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
   `/tmp` → `soft reboot #1: exec /sbin/jiminit --stage2` → 再次以 PID 1 启动、
   服务与 getty 全部重新拉起并出现新的 login 提示；之后再登录并 `kill -TERM 1`
   正常 `Power down`；
+- `/usr` 在独立 ext4 上（fstab `UUID=` 挂载）→ `pivot_root` → PID 1 的运行路径为
+  `/usr/sbin/jiminit` → 登录 → 关机；
+- `FSCK=1 COLDPLUG=1` 镜像：扫描到 31 个 modalias，kmod modprobe 按 alias 加载，
+  `e2fsck -p /dev/vda` 真实执行并以 0 退出；
 - LUKS2 容器（crypttab `UUID=` + 交互口令）→ `lvm vgchange -ay` →
   `root=/dev/mapper/jiminitvg-root` → 登录 → 关机，冒烟测试全过；
 - `root=UUID=<fs-uuid>`、`root=PARTUUID=<gpt-partition-guid>` 均能定位设备
@@ -268,6 +289,11 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - LVM 只做整个卷组的 `vgchange -ay`：不处理 thin/raid/cache 的特殊激活，也不读
   宿主的 lvm.conf（initramfs 里用一份精简配置，关掉 udev 同步）；
 - initramfs 打包 cryptsetup/lvm/modprobe 时按 `ldd` 收库，镜像会涨到约 11MB；
+- coldplug 只扫启动时 `/sys/bus/*/devices/*/modalias` 已存在的设备：不处理
+  uevent 热插拔、udev 规则和固件加载（`/lib/firmware` 不会打包）；模块集合由
+  `COLDPLUG_MODULES` 决定，默认为常见存储/文件系统驱动；
+- 打包真实 fsck 时只带 e2fsprogs（ext2/3/4），xfs/btrfs 的检查工具没有打包；
+- `/usr` 不会像 systemd 那样自动探测并挂载：必须写在 `/etc/fstab` 里；
 - 也还没处理 `/usr` 单独挂载后切根前的 pivot 场景；
 - jiminit 不内置认证：没有 PAM，也不解析 `/etc/shadow`，完全依赖外部 `login`
   （测试镜像里是 busybox）；替换成 util-linux login/agetty 时应同样可用；

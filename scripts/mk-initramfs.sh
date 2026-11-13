@@ -99,9 +99,45 @@ EOF
     chmod 755 "$ROOT/sbin/modprobe"
 fi
 
+# --- optional packaging hooks -----------------------------------------
+# The default image stays small; these are opt-in.
+package_kmod() {
+    KMOD_MODPROBE=${KMOD_MODPROBE:-$(command -v modprobe)}
+    copy_with_libs "$KMOD_MODPROBE"
+    if [ "$KMOD_MODPROBE" != /usr/bin/modprobe ]; then
+        mkdir -p "$ROOT/usr/bin"
+        cp -L "$KMOD_MODPROBE" "$ROOT/usr/bin/modprobe"
+    fi
+    # The kernel's request_module() helper looks for /sbin/modprobe.
+    ln -sf /usr/bin/modprobe "$ROOT/sbin/modprobe"
+
+    kmod_dir="/lib/modules/$(uname -r)"
+    for name in modules.dep modules.dep.bin modules.builtin modules.builtin.bin \
+        modules.alias modules.alias.bin; do
+        if [ -f "$kmod_dir/$name" ]; then
+            mkdir -p "$ROOT$kmod_dir"
+            cp "$kmod_dir/$name" "$ROOT$kmod_dir/$name"
+        fi
+    done
+}
+
+# Copy the listed modules and all their dependencies into the image.
+package_modules() {
+    : > "$OUT/kmods.tmp"
+    for module in $1; do
+        modprobe --show-depends "$module" 2>/dev/null |
+            awk '$1 == "insmod" {print $2}' >> "$OUT/kmods.tmp"
+    done
+    sort -u "$OUT/kmods.tmp" -o "$OUT/kmods.tmp"
+    while read -r ko; do
+        mkdir -p "$ROOT$(dirname "$ko")"
+        cp "$ko" "$ROOT$ko"
+    done < "$OUT/kmods.tmp"
+    rm -f "$OUT/kmods.tmp"
+}
+
 # Packaging for an encrypted (and optionally LVM) root: the real cryptsetup,
-# lvm and modprobe binaries plus their libraries, the device-mapper kernel
-# modules and the crypttab. This keeps the default image small.
+# lvm and modprobe binaries, the device-mapper modules and the crypttab.
 if [ "${LUKS:-0}" = "1" ]; then
     for program in /usr/bin/cryptsetup /usr/bin/lvm; do
         copy_with_libs "$program"
@@ -109,17 +145,7 @@ if [ "${LUKS:-0}" = "1" ]; then
     ln -sf /usr/bin/cryptsetup "$ROOT/sbin/cryptsetup"
     ln -sf /usr/bin/lvm "$ROOT/sbin/lvm"
 
-    # kmod's modprobe understands the modules.dep index, unlike staged
-    # busybox modprobe variants; stage 1 needs it to load dm_mod/dm_crypt.
-    KMOD_MODPROBE=${KMOD_MODPROBE:-$(command -v modprobe)}
-    copy_with_libs "$KMOD_MODPROBE"
-    if [ "$KMOD_MODPROBE" != /usr/bin/modprobe ]; then
-        mkdir -p "$ROOT/usr/bin"
-        cp -L "$KMOD_MODPROBE" "$ROOT/usr/bin/modprobe"
-    fi
-
-    mkdir -p "$ROOT/etc/lvm/archive" "$ROOT/etc/lvm/backup" "$ROOT/run" \
-        "$ROOT/etc/lvm"
+    mkdir -p "$ROOT/etc/lvm/archive" "$ROOT/etc/lvm/backup" "$ROOT/run"
     cat > "$ROOT/etc/lvm/lvm.conf" <<'EOF'
 # Initramfs LVM: no udev, no devices file.
 devices {
@@ -132,23 +158,8 @@ activation {
 }
 EOF
 
-    kmod_dir="/lib/modules/$(uname -r)"
-    {
-        modprobe --show-depends dm_mod
-        modprobe --show-depends dm_crypt
-    } | awk '$1 == "insmod" {print $2}' | sort -u > "$OUT/kmods.tmp"
-    while read -r module; do
-        mkdir -p "$ROOT$(dirname "$module")"
-        cp "$module" "$ROOT$module"
-    done < "$OUT/kmods.tmp"
-    rm -f "$OUT/kmods.tmp"
-    for name in modules.dep modules.dep.bin modules.builtin modules.builtin.bin \
-        modules.alias modules.alias.bin; do
-        if [ -f "$kmod_dir/$name" ]; then
-            mkdir -p "$ROOT$kmod_dir"
-            cp "$kmod_dir/$name" "$ROOT$kmod_dir/$name"
-        fi
-    done
+    package_kmod
+    package_modules "dm_mod dm_crypt"
 
     mkdir -p "$ROOT/etc"
     printf '# device-mapper and dm-crypt for LUKS/LVM\ndm_mod\ndm_crypt\n' \
@@ -157,6 +168,34 @@ EOF
     if [ -n "${CRYPTAB:-}" ]; then
         install -m644 "$CRYPTAB" "$ROOT/etc/crypttab"
     fi
+fi
+
+# Real hardware: storage drivers are autoloaded from their modalias, while
+# filesystem modules have no modalias and must be listed explicitly (mount(2)
+# asks request_module for them, which needs /sbin/modprobe from package_kmod).
+if [ "${COLDPLUG:-0}" = "1" ] && [ "${LUKS:-0}" != "1" ]; then
+    package_kmod
+    package_modules "${COLDPLUG_MODULES:-ahci sd_mod virtio_blk virtio_scsi nvme usb_storage xhci_pci xhci_hcd ext4 xfs btrfs vfat}"
+    cat > "$ROOT/etc/modules" <<'EOF'
+# Filesystems needed before the root mount; storage drivers come from the
+# modalias coldplug in stage 1.
+ext4
+xfs
+btrfs
+vfat
+EOF
+fi
+
+# Real fsck: symlink it as /sbin/fsck so stage 1's plain `fsck -p DEVICE`
+# works without the util-linux dispatcher or an /etc/fstab.
+if [ "${FSCK:-0}" = "1" ]; then
+    for program in /sbin/e2fsck /sbin/fsck.ext4; do
+        copy_with_libs "$program"
+    done
+    ln -sf e2fsck "$ROOT/sbin/fsck"
+    ln -sf e2fsck "$ROOT/sbin/fsck.ext2"
+    ln -sf e2fsck "$ROOT/sbin/fsck.ext3"
+    ln -sf e2fsck "$ROOT/sbin/fsck.ext4"
 fi
 
 # Write the cpio archive first so a cpio failure is not hidden by gzip's

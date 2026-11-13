@@ -2,7 +2,8 @@
 
 use anyhow::{bail, Context, Result};
 use nix::mount::MsFlags;
-use nix::unistd::{chdir, chroot};
+use nix::mount::{umount2, MntFlags};
+use nix::unistd::{chdir, chroot, pivot_root};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ pub fn run() -> Result<()> {
         Path::new(crate::modules::MODULES_FILE),
         Path::new(crate::modules::MODPROBE_DIR),
     )?;
+    crate::coldplug::load();
 
     crate::luks::unlock_all(Path::new(crate::luks::CRYPTTAB))?;
 
@@ -51,6 +53,9 @@ pub fn run() -> Result<()> {
     crate::info!("mounted {} on /newroot", device.display());
 
     mount_fstab("/newroot")?;
+    if crate::mount::is_mountpoint("/newroot/usr") {
+        crate::info!("usr: /usr comes from a separate filesystem");
+    }
 
     // The real root owns the configuration; read it before choosing which
     // binary to exec so a customized init_path is honored.
@@ -59,6 +64,14 @@ pub fn run() -> Result<()> {
     let init_path = cfg.init_path.clone();
     let stage2_path = Path::new("/newroot").join(init_path.trim_start_matches('/'));
     if !stage2_path.exists() {
+        if init_path.starts_with("/usr/") && !crate::mount::is_mountpoint("/newroot/usr") {
+            bail!(
+                "{} not found: init_path lives under /usr, but /usr is not a \
+                 separate mount point (add it to /etc/fstab or install the binary \
+                 in the root filesystem)",
+                stage2_path.display()
+            );
+        }
         bail!(
             "{} not found in the new root; install the jiminit binary there",
             stage2_path.display()
@@ -82,17 +95,27 @@ pub fn run() -> Result<()> {
         }
     }
 
-    chdir("/newroot").context("chdir /newroot")?;
-    match crate::mount::switch_root_move() {
-        Ok(()) => {
-            crate::info!("moved new root onto /");
-            // Re-anchor the process root on the moved mount, like busybox
-            // switch_root does; without this the old rootfs stays current.
-            chroot(".").context("chroot . after switch_root")?;
-        }
+    // pivot_root makes the new root the mount tree root, carrying /usr and
+    // every other fstab mount with it. If the kernel refuses (e.g. shared
+    // mount propagation), fall back to the classic MS_MOVE switch_root.
+    match pivot_into_new_root() {
+        Ok(()) => crate::info!("pivot_root: switched to the new root"),
         Err(e) => {
-            crate::warn!("switch_root move failed ({e}); falling back to chroot");
-            chroot("/newroot").context("chroot /newroot")?;
+            crate::warn!("pivot_root failed ({e:#}); falling back to MS_MOVE + chroot");
+            chdir("/newroot").context("chdir /newroot")?;
+            match crate::mount::switch_root_move() {
+                Ok(()) => {
+                    crate::info!("moved new root onto /");
+                    // Re-anchor the process root on the moved mount, like
+                    // busybox switch_root; otherwise the old rootfs stays
+                    // current and exec of /sbin/jiminit gets ENOENT.
+                    chroot(".").context("chroot . after switch_root")?;
+                }
+                Err(e) => {
+                    crate::warn!("switch_root move failed ({e}); falling back to chroot");
+                    chroot("/newroot").context("chroot /newroot")?;
+                }
+            }
         }
     }
     chdir("/").context("chdir / after switch_root")?;
@@ -101,6 +124,19 @@ pub fn run() -> Result<()> {
 
     // exec only returns on failure.
     unreachable!()
+}
+
+/// Detach the initramfs root and make the new root the real `/`.
+///
+/// `pivot_root(".", ".")` stacks the old root on top of the new one at the
+/// current directory; detaching it leaves the new root (including its /usr
+/// mount) in place. This is the pattern recommended by pivot_root(2).
+fn pivot_into_new_root() -> Result<()> {
+    chdir("/newroot").context("chdir /newroot")?;
+    pivot_root(".", ".").context("pivot_root(. , .)")?;
+    umount2(".", MntFlags::MNT_DETACH).context("detach the old root")?;
+    chdir("/").context("chdir / after pivot_root")?;
+    Ok(())
 }
 
 /// Activate LVM volume groups when the kernel command line asks for it.

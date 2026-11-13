@@ -222,7 +222,7 @@ fn check_status(what: &str, target: &str, status: ExitStatus) -> Result<()> {
     }
 }
 
-fn find_modprobe() -> Option<&'static str> {
+pub(crate) fn find_modprobe() -> Option<&'static str> {
     [
         "/sbin/modprobe",
         "/bin/modprobe",

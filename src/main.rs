@@ -11,6 +11,7 @@
 //! PID 1 must never exit, so every failure ends up in a rescue shell loop.
 
 mod cmdline;
+mod coldplug;
 mod config;
 mod crypttab;
 mod fstab;

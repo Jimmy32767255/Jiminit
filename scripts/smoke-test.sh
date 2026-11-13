@@ -58,7 +58,7 @@ login() {
 }
 
 ./scripts/build.sh >/dev/null
-FSCK_STUB=1 ./scripts/mk-initramfs.sh >/dev/null
+FSCK_STUB=1 MODPROBE_STUB=1 ./scripts/mk-initramfs.sh >/dev/null
 ./scripts/mk-rootfs.sh >/dev/null
 
 rm -f "$FIFO" "$LOG"
@@ -119,6 +119,11 @@ done
 wait "$qpid" || true
 
 grep -q 'moved new root onto /' "$LOG" || fail "switch_root did not run"
+grep -q 'stub-modprobe: virtio_blk' "$LOG" || fail "modules were not loaded before the root was resolved"
+grep -q 'stub-modprobe: foo irq=5' "$LOG" || fail "/etc/modules parameters were not passed to modprobe"
+grep -q 'modules: blacklisted_mod is blacklisted' "$LOG" || fail "modprobe.d blacklist was not applied"
+grep -q 'stub-modprobe: foo irq=9 timeout=2' "$LOG" || fail "modprobe.d options/alias were not applied"
+grep -q 'stub-install: baz' "$LOG" || fail "modprobe.d install command was not run"
 grep -q 'stub-fsck: -p /dev/vda' "$LOG" || fail "fsck was not run before mounting the root"
 grep -q 'fsck: exited with 0' "$LOG" || fail "fsck result was not checked"
 grep -q 'fstab: mounted tmpfs on /newroot/data' "$LOG" || fail "fstab entry was not mounted"
@@ -142,4 +147,4 @@ grep -q 'soft reboot: fresh tmpfs on /tmp' "$LOG" || fail "/tmp was not reset"
 [ "$(count 'login:')" -ge 3 ] || fail "getty did not come back after the soft reboot"
 grep -q 'reboot: Power down' "$LOG" || fail "poweroff was not requested"
 
-echo "PASS: switch_root, PID 1, getty/login, runlevels, services, soft reboot and poweroff all work"
+echo "PASS: modules, fsck, fstab, switch_root, PID 1, getty/login, runlevels, services, soft reboot and poweroff all work"

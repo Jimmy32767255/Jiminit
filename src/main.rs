@@ -14,6 +14,7 @@ mod cmdline;
 mod config;
 mod fstab;
 mod log;
+mod modules;
 mod mount;
 mod rootdev;
 mod runlevel;

@@ -38,6 +38,36 @@ EOF
     chmod 755 "$ROOT/sbin/fsck"
 fi
 
+# Likewise a stub modprobe plus a small /etc/modules and modprobe.d fixture
+# lets the smoke test exercise the module-loading path.
+if [ "${MODPROBE_STUB:-0}" = "1" ]; then
+    mkdir -p "$ROOT/etc/modprobe.d"
+    cat > "$ROOT/etc/modules" <<'EOF'
+# Modules loaded before the root device is resolved.
+virtio_blk
+foo irq=5
+blacklisted_mod
+baz
+mynet
+EOF
+    cat > "$ROOT/etc/modprobe.d/test.conf" <<'EOF'
+blacklist blacklisted_mod
+options foo irq=9 timeout=2
+install baz echo "stub-install: baz"
+alias mynet foo
+EOF
+    cat > "$ROOT/sbin/modprobe" <<'EOF'
+#!/bin/sh
+echo "stub-modprobe: $*"
+EOF
+    if [ "${MODPROBE_STUB_FAIL:-0}" = "1" ]; then
+        echo "exit 1" >> "$ROOT/sbin/modprobe"
+    else
+        echo "exit 0" >> "$ROOT/sbin/modprobe"
+    fi
+    chmod 755 "$ROOT/sbin/modprobe"
+fi
+
 (cd "$ROOT" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9) \
     > "$OUT/initramfs.cpio.gz"
 

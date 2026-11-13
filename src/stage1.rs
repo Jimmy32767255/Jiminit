@@ -14,6 +14,11 @@ pub fn run() -> Result<()> {
 
     crate::mount::mount_pseudo_fs();
 
+    crate::modules::load(
+        Path::new(crate::modules::MODULES_FILE),
+        Path::new(crate::modules::MODPROBE_DIR),
+    )?;
+
     let cmdline = crate::cmdline::Cmdline::read().context("read /proc/cmdline")?;
     let cfg = crate::config::load(Path::new("/etc/jiminit.toml"));
 

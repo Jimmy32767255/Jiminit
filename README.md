@@ -58,10 +58,14 @@ scripts/
 4. 加载 `/etc/jiminit/services.d/*.toml`，按依赖关系启动服务；
 5. fork 登录 shell（argv0 带 `-` 前缀），shell 退出时按配置 respawn（否则关机）；
 6. 每次唤醒回收所有子进程：服务退出交给监督器处理，其他孤儿只记录；
-7. `SIGINT`（ctrl-alt-del）：重启；`SIGTERM`：关机；
+7. `SIGINT`（ctrl-alt-del）：重启；`SIGTERM`：关机；`SIGUSR1`：软重启；
 8. 关机流程：SIGHUP 结束 shell → 按启动逆序给服务发 SIGTERM → 等待
    `shutdown_timeout_ms` → 剩余进程 SIGKILL → `sync` → 根重新挂载为只读 →
-   `reboot(RB_POWER_OFF | RB_AUTOBOOT)`。
+   `reboot(RB_POWER_OFF | RB_AUTOBOOT)`；
+9. 软重启复用同一段停机流程，但在 `sync` 之后：给 `/run`、`/tmp` 各挂一个新的
+   tmpfs（先 `MNT_DETACH` 原有挂载）→ `execve` 自己（`/proc/self/exe --stage2`，
+   环境里带 `JIMINIT_SOFT_REBOOTS=n+1`）→ 新 stage2 重新读配置、起服务、起 shell。
+   因为不经过内核，PID 仍为 1；exec 失败则进入 rescue shell，而不是让机器卡死。
 
 任何阶段出错或 panic 都不会让 PID 1 退出，而是进入 rescue shell 循环。
 
@@ -136,6 +140,10 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - `kill -TERM 1` → `reboot: Power down`，QEMU 正常退出（shell 用 SIGHUP 结束，
   不再等满超时）；
 - `kill -INT 1` → `reboot: Restarting system`；
+- `kill -USR1 1` → `SIGUSR1: soft reboot` → 停机 → `fresh tmpfs on /run`、
+  `/tmp` → `soft reboot #1: exec /sbin/jiminit --stage2` → 再次以 PID 1 启动、
+  服务与 shell 全部重新拉起（日志里 `svc/ticker: started` 出现两次）；
+  之后再 `kill -TERM 1` 正常 `Power down`；
 - `root=UUID=<fs-uuid>`、`root=PARTUUID=<gpt-partition-guid>` 均能定位设备
   （GPT 分区测试得到 `/dev/vda1`）。
 
@@ -147,7 +155,11 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - 服务没有就绪探测（没有 sd_notify 之类），依赖只保证启动顺序；
 - 服务没有 cgroup 隔离，也不切换用户/组运行；
 - 只支持 x86_64 上验证过的路径，其他架构未测试；
-- `root=` 只支持 `/dev` 路径、UUID、PARTUUID，不支持 LABEL。
+- `root=` 只支持 `/dev` 路径、UUID、PARTUUID，不支持 LABEL；
+- 软重启只重新执行 stage2：initramfs 已经不在，内核也不会重新引导，所以
+  `root=`/initramfs/内核参数相关的改动必须走真正的重启；
+- 软重启用 tmpfs 顶替 `/run`、`/tmp`，旧内容若原本在根文件系统上仍会占用空间
+  （真重启才会回收）。
 
 ## 设计取舍
 

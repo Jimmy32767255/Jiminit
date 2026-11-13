@@ -19,8 +19,10 @@ fail() {
 }
 
 count() {
-    # grep exits 1 when there are no matches.
-    grep -c "$1" "$LOG" 2>/dev/null || true
+    # grep exits 1 when there are no matches (and prints nothing when $LOG
+    # does not exist yet), so always yield a number.
+    matches=$(grep -c "$1" "$LOG" 2>/dev/null || true)
+    echo "${matches:-0}"
 }
 
 wait_for() {
@@ -62,6 +64,7 @@ FSCK_STUB=1 MODPROBE_STUB=1 ./scripts/mk-initramfs.sh >/dev/null
 ./scripts/mk-rootfs.sh >/dev/null
 
 rm -f "$FIFO" "$LOG"
+: >"$LOG"
 mkfifo "$FIFO"
 # Hold the FIFO open read+write so QEMU's stdin never blocks at startup.
 exec 9<>"$FIFO"
@@ -118,7 +121,11 @@ while kill -0 "$qpid" 2>/dev/null; do
     fi
     sleep 1
 done
-wait "$qpid" || true
+qemu_rc=0
+wait "$qpid" || qemu_rc=$?
+if [ "$qemu_rc" -ne 0 ]; then
+    fail "qemu exited with status $qemu_rc"
+fi
 
 grep -q 'moved new root onto /' "$LOG" || fail "switch_root did not run"
 grep -q 'stub-modprobe: virtio_blk' "$LOG" || fail "modules were not loaded before the root was resolved"

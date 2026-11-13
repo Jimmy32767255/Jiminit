@@ -68,7 +68,10 @@ EOF
     chmod 755 "$ROOT/sbin/modprobe"
 fi
 
-(cd "$ROOT" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9) \
-    > "$OUT/initramfs.cpio.gz"
+# Write the cpio archive first so a cpio failure is not hidden by gzip's
+# exit status (POSIX sh has no pipefail).
+(cd "$ROOT" && find . -print0 | cpio --null -o --format=newc) > "$OUT/initramfs.cpio"
+gzip -9 -c "$OUT/initramfs.cpio" > "$OUT/initramfs.cpio.gz"
+rm -f "$OUT/initramfs.cpio"
 
 ls -lh "$OUT/initramfs.cpio.gz"

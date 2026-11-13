@@ -49,9 +49,10 @@ impl Entry {
     }
 
     /// Split fstab options into generic mount flags and the fstype-specific
-    /// data string. Unknown options are passed through as data, which is how
-    /// filesystem-specific options (`data=journal`, `compress=zstd`, ...)
-    /// reach the kernel.
+    /// data string. Options that mount(8) consumes itself (`_netdev`, `x-*`,
+    /// `comment=`, `user`, ...) are dropped, `bind`/`rbind` become mount
+    /// flags, and everything else is passed as filesystem data, which is how
+    /// options such as `data=journal` or `compress=zstd` reach the kernel.
     pub fn mount_options(&self) -> (MsFlags, Option<String>) {
         let mut flags = MsFlags::empty();
         let mut data = Vec::new();
@@ -59,8 +60,9 @@ impl Entry {
         for option in &self.options {
             match option.as_str() {
                 "ro" => flags |= MsFlags::MS_RDONLY,
-                "rw" | "defaults" | "auto" | "noauto" | "nofail" | "user" | "users" | "owner"
-                | "group" | "quiet" => {}
+                "rw" => flags.remove(MsFlags::MS_RDONLY),
+                "bind" => flags |= MsFlags::MS_BIND,
+                "rbind" => flags |= MsFlags::MS_BIND | MsFlags::MS_REC,
                 "suid" => flags.remove(MsFlags::MS_NOSUID),
                 "nosuid" => flags |= MsFlags::MS_NOSUID,
                 "dev" => flags.remove(MsFlags::MS_NODEV),
@@ -77,7 +79,11 @@ impl Entry {
                 "norelatime" => flags.remove(MsFlags::MS_RELATIME),
                 "strictatime" => flags |= MsFlags::MS_STRICTATIME,
                 "lazytime" => flags |= MsFlags::MS_LAZYTIME,
-                other => data.push(other.to_string()),
+                // Filesystem-specific options go to mount(2) as data.
+                other if !is_userspace_option(other) => data.push(other.to_string()),
+                // Options that only mount(8)/systemd consume; never pass them
+                // to mount(2), where ext4/xfs would reject the whole mount.
+                _ => {}
             }
         }
 
@@ -88,6 +94,30 @@ impl Entry {
         };
         (flags, data)
     }
+}
+
+/// Options that only exist in the mount(8)/systemd fstab dialect.
+fn is_userspace_option(option: &str) -> bool {
+    matches!(
+        option,
+        "defaults"
+            | "auto"
+            | "noauto"
+            | "nofail"
+            | "user"
+            | "users"
+            | "nouser"
+            | "owner"
+            | "group"
+            | "quiet"
+            | "silent"
+            | "loud"
+            | "bg"
+            | "fg"
+            | "fail"
+    ) || option == "_netdev"
+        || option.starts_with("x-")
+        || option.starts_with("comment=")
 }
 
 /// Parse fstab text into the entries worth mounting in the initramfs.
@@ -164,26 +194,60 @@ pub fn load(path: &Path) -> Result<Vec<Entry>> {
 /// Decode the octal escapes fstab uses for whitespace (`\040`, `\011`, ...).
 fn unescape(value: &str) -> String {
     let bytes = value.as_bytes();
-    let mut out = String::with_capacity(value.len());
+    let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'\\' && index + 3 < bytes.len() {
-            let digits = &value[index + 1..index + 4];
-            if let Ok(code) = u8::from_str_radix(digits, 8) {
-                out.push(code as char);
+            let digits = &bytes[index + 1..index + 4];
+            if digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+                let code = (digits[0] - b'0') * 64 + (digits[1] - b'0') * 8 + (digits[2] - b'0');
+                out.push(code);
                 index += 4;
                 continue;
             }
         }
-        out.push(bytes[index] as char);
+        out.push(bytes[index]);
         index += 1;
     }
-    out
+    // fstab is UTF-8; decode after escaping so non-ASCII paths survive and
+    // no &str is sliced at a non-char boundary (which would panic).
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_escapes_without_corrupting_utf8() {
+        assert_eq!(unescape("/mnt/my\\040data"), "/mnt/my data");
+        assert_eq!(unescape("/mnt/数据"), "/mnt/数据");
+        assert_eq!(unescape("/mnt/\\a数"), "/mnt/\\a数");
+    }
+
+    #[test]
+    fn drops_userspace_options_and_maps_bind_and_rw() {
+        let entry = |options: &str| Entry {
+            device: "/dev/vdb".into(),
+            mountpoint: "/data".into(),
+            fstype: "ext4".into(),
+            options: options.split(',').map(str::to_string).collect(),
+        };
+
+        let (flags, data) = entry("ro,rw,defaults,compress=zstd").mount_options();
+        assert!(!flags.contains(MsFlags::MS_RDONLY));
+        assert_eq!(data.as_deref(), Some("compress=zstd"));
+
+        let (flags, data) =
+            entry("_netdev,x-systemd.device-timeout=10,comment=home").mount_options();
+        assert!(flags.is_empty());
+        assert_eq!(data, None);
+
+        let (flags, _) = entry("bind").mount_options();
+        assert!(flags.contains(MsFlags::MS_BIND));
+        let (flags, _) = entry("rbind").mount_options();
+        assert!(flags.contains(MsFlags::MS_BIND) && flags.contains(MsFlags::MS_REC));
+    }
 
     #[test]
     fn skips_root_swap_pseudo_and_noauto_entries() {

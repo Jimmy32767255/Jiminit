@@ -20,7 +20,6 @@ pub fn run() -> Result<()> {
     )?;
 
     let cmdline = crate::cmdline::Cmdline::read().context("read /proc/cmdline")?;
-    let cfg = crate::config::load(Path::new("/etc/jiminit.toml"));
 
     let root_spec = cmdline
         .value("root")
@@ -50,6 +49,9 @@ pub fn run() -> Result<()> {
 
     mount_fstab("/newroot")?;
 
+    // The real root owns the configuration; read it before choosing which
+    // binary to exec so a customized init_path is honored.
+    let cfg = crate::config::load(Path::new("/newroot/etc/jiminit.toml"));
     let init_path = cfg.init_path.clone();
     let stage2_path = Path::new("/newroot").join(init_path.trim_start_matches('/'));
     if !stage2_path.exists() {

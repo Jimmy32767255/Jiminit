@@ -17,11 +17,13 @@ impl Cmdline {
         }
     }
 
-    /// Value of a `key=value` token.
+    /// Value of a `key=value` token. Later tokens win, matching how the
+    /// kernel applies repeated `__setup` parameters.
     pub fn value(&self, key: &str) -> Option<&str> {
         let prefix = format!("{key}=");
         self.tokens
             .iter()
+            .rev()
             .find_map(|token| token.strip_prefix(prefix.as_str()))
     }
 
@@ -34,6 +36,12 @@ impl Cmdline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_values_override_earlier_ones() {
+        let cm = Cmdline::parse("root=/dev/sda root=/dev/vdb rw");
+        assert_eq!(cm.value("root"), Some("/dev/vdb"));
+    }
 
     #[test]
     fn parses_values_and_flags() {

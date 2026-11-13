@@ -41,8 +41,13 @@ pub fn parse_modules(text: &str) -> Vec<(String, Vec<String>)> {
 /// Read every `*.conf` in `dir` (sorted by name) and merge their rules.
 pub fn parse_rules(dir: &Path) -> Rules {
     let mut rules = Rules::default();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return rules;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return rules,
+        Err(e) => {
+            crate::warn!("modules: cannot read {}: {e}", dir.display());
+            return rules;
+        }
     };
 
     let mut files: Vec<_> = entries

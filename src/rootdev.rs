@@ -9,6 +9,7 @@
 use anyhow::{bail, Result};
 use std::collections::BTreeSet;
 use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, FileTypeExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,12 +18,23 @@ use std::time::Duration;
 const SAMPLE_LEN: usize = 0x10000 + 0x1000;
 
 pub fn resolve(spec: &str) -> Result<PathBuf> {
-    let spec = spec.trim_matches('"');
+    let spec = spec.trim().trim_matches('"');
+    if spec.is_empty() {
+        bail!("empty root= specification");
+    }
 
     if let Some(uuid) = spec.strip_prefix("UUID=") {
-        find_by_uuid(uuid.trim_matches('"'))
+        let uuid = uuid.trim_matches('"').trim();
+        if uuid.is_empty() {
+            bail!("root=UUID= is missing a value");
+        }
+        find_by_uuid(uuid)
     } else if let Some(partuuid) = spec.strip_prefix("PARTUUID=") {
-        find_by_partuuid(partuuid.trim_matches('"'))
+        let partuuid = partuuid.trim_matches('"').trim();
+        if partuuid.is_empty() {
+            bail!("root=PARTUUID= is missing a value");
+        }
+        find_by_partuuid(partuuid)
     } else if spec.starts_with("LABEL=") || spec.starts_with("PARTLABEL=") {
         bail!("{spec} is not supported yet (only /dev/*, UUID= and PARTUUID=)")
     } else if spec.starts_with('/') {
@@ -186,9 +198,28 @@ struct GptHeader {
     entry_size: u32,
 }
 
-fn read_gpt_header(file: &File) -> Option<GptHeader> {
+/// Logical sector size of a block device; plain files and unreadable
+/// devices fall back to 512 (the PC default).
+fn logical_sector_size(file: &File) -> u64 {
+    // BLKSSZGET from linux/fs.h: _IO(0x12, 104).
+    const BLKSSZGET: libc::c_ulong = 0x1268;
+    let mut size: libc::c_int = 0;
+    // SAFETY: BLKSSZGET writes one c_int into the provided pointer, which is
+    // valid for the duration of the call.
+    let rc = unsafe { libc::ioctl(file.as_raw_fd(), BLKSSZGET, &mut size) };
+    if rc == 0 && size > 0 {
+        size as u64
+    } else {
+        512
+    }
+}
+
+/// Read the GPT header at the second logical sector (LBA 1). LBA addresses
+/// in the table are relative to the logical sector size, which is 4096 on
+/// 4Kn disks.
+fn read_gpt_header(file: &File, sector_size: u64) -> Option<GptHeader> {
     let mut header = [0u8; 92];
-    file.read_exact_at(&mut header, 512).ok()?;
+    file.read_exact_at(&mut header, sector_size).ok()?;
     if &header[0..8] != b"EFI PART" {
         return None;
     }
@@ -199,13 +230,13 @@ fn read_gpt_header(file: &File) -> Option<GptHeader> {
     })
 }
 
-fn gpt_lookup(file: &File, header: &GptHeader, want: &str) -> Option<usize> {
+fn gpt_lookup(file: &File, header: &GptHeader, sector_size: u64, want: &str) -> Option<usize> {
     if header.entry_size < 32 || header.entry_size > 4096 {
         return None;
     }
     let count = header.entry_count.min(128) as usize;
     let mut entries = vec![0u8; count * header.entry_size as usize];
-    file.read_exact_at(&mut entries, header.entries_lba * 512)
+    file.read_exact_at(&mut entries, header.entries_lba * sector_size)
         .ok()?;
 
     for index in 0..count {
@@ -249,10 +280,12 @@ fn parse_mbr_partuuid(spec: &str) -> Option<(u32, u8)> {
 
 fn partuuid_match(device: &Path, want: &str) -> Option<usize> {
     let file = File::open(device).ok()?;
-    if let Some(header) = read_gpt_header(&file) {
-        if let Some(index) = gpt_lookup(&file, &header, want) {
-            return Some(index);
-        }
+    let sector_size = logical_sector_size(&file);
+    if let Some(header) = read_gpt_header(&file, sector_size) {
+        // A valid GPT means PARTUUIDs are GPT unique GUIDs. The protective
+        // MBR has a zero disk signature, so falling back would match
+        // "00000000-01" against a bogus entry.
+        return gpt_lookup(&file, &header, sector_size, want);
     }
     mbr_lookup(&file, want)
 }
@@ -351,5 +384,44 @@ mod tests {
         assert_eq!(resolve("/dev/vda1").unwrap(), PathBuf::from("/dev/vda1"));
         assert_eq!(resolve("vda1").unwrap(), PathBuf::from("/dev/vda1"));
         assert!(resolve("LABEL=root").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_root_specs() {
+        assert!(resolve("").is_err());
+        assert!(resolve("  ").is_err());
+        assert!(resolve("UUID=").is_err());
+        assert!(resolve("UUID=  ").is_err());
+        assert!(resolve("PARTUUID=").is_err());
+    }
+
+    #[test]
+    fn gpt_entries_follow_logical_sector_size() {
+        let path = std::env::temp_dir().join(format!("jiminit-gpt-{}", std::process::id()));
+        {
+            let file = File::create(&path).unwrap();
+            let mut header = vec![0u8; 92];
+            header[0..8].copy_from_slice(b"EFI PART");
+            header[72..80].copy_from_slice(&2u64.to_le_bytes());
+            header[80..84].copy_from_slice(&1u32.to_le_bytes());
+            header[84..88].copy_from_slice(&128u32.to_le_bytes());
+            file.write_all_at(&header, 4096).unwrap();
+
+            let mut entry = vec![0u8; 128];
+            let guid = [
+                0x67, 0x45, 0x23, 0x01, 0xab, 0x89, 0xef, 0xcd, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ];
+            entry[16..32].copy_from_slice(&guid);
+            file.write_all_at(&entry, 2 * 4096).unwrap();
+        }
+
+        let file = File::open(&path).unwrap();
+        let header = read_gpt_header(&file, 4096).unwrap();
+        assert_eq!(
+            gpt_lookup(&file, &header, 4096, "01234567-89ab-cdef-0123-456789abcdef"),
+            Some(1)
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

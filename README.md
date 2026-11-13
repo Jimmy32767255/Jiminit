@@ -57,8 +57,11 @@ scripts/
    等视为失败，拒绝挂载并进入 rescue（0/1/2 视为可用）；
 6. 挂载到 `/newroot`，读取 `/newroot/etc/fstab`，把根以外的条目（跳过 swap、伪文件
    系统、`noauto` 和重复挂载点）挂到 `/newroot/<mountpoint>`；`nofail` 的失败只告警，
-   其余失败中止启动；
-7. 校验 `/newroot/sbin/jiminit` 存在；
+   其余失败中止启动。`bind`/`rbind` 转成对应挂载标志，`_netdev`、`x-*`、`comment=`、
+   `users` 等只属于 mount(8) 的选项会被丢弃而不是传给内核；其余选项作为文件系统
+   参数透传；
+7. 从 `/newroot/etc/jiminit.toml` 读 `init_path`（stage1 以真实根的配置为准），并校验
+   该可执行文件存在；
 8. 把 `/dev`、`/proc`、`/sys` 的挂载点 MS_MOVE 进新根；
 9. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
    （与 busybox switch_root 相同的收尾，缺 `chroot(".")` 会导致后续 exec 仍看旧根）；
@@ -80,9 +83,10 @@ scripts/
 7. 监听 `/run/jiminit.sock`（权限 `0600`，仅 root 可控制），接受 `status` 与
    `runlevel <name>` 请求（见下文）；
 8. `SIGINT`（ctrl-alt-del）：重启；`SIGTERM`：关机；`SIGUSR1`：软重启；
-9. 关机流程：SIGHUP 结束所有 getty/单用户 shell → 按启动逆序给服务发 SIGTERM → 等待
-   `shutdown_timeout_ms` → 剩余进程 SIGKILL → `sync` → 根重新挂载为只读 →
-   `reboot(RB_POWER_OFF | RB_AUTOBOOT)`；
+9. 关机流程：SIGHUP 结束所有 getty/单用户 shell → 按启动逆序给服务发 SIGTERM →
+   向所有剩余进程（包括 login 的子进程等非直接子进程）发 SIGTERM → 等待
+   `shutdown_timeout_ms`，直到没有用户进程还能写文件系统 → 仍存活则 SIGKILL 并再等
+   2s → `sync` → 根重新挂载为只读 → `reboot(RB_POWER_OFF | RB_AUTOBOOT)`；
 10. 软重启复用同一段停机流程，但在 `sync` 之后：给 `/run`、`/tmp` 各挂一个新的
     tmpfs（先 `MNT_DETACH` 原有挂载）→ `execve` 自己（`/proc/self/exe --stage2`，
     环境里带 `JIMINIT_SOFT_REBOOTS=n+1`）→ 新 stage2 重新读配置、起服务、起 getty。
@@ -227,7 +231,11 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - fsck 只检查根文件系统，且依赖 initramfs 里自带 `fsck` 程序（没有就跳过并记日志）；
   真正可用的 e2fsprogs 还没打进测试镜像；
 - fstab 只用于 switch_root 前挂载根以外的条目：不支持 `LABEL=`/`/dev/disk/by-*`，
-  不处理 swap，也不做挂载点自动创建；
+  不处理 swap，也不做挂载点自动创建或路径规范化；
+- fstab 里不认识的选项按文件系统参数透传（`data=journal` 之类可用；拼错的选项会
+  由内核拒绝并中止启动），没有实现 util-linux 的完整选项表；
+- `PARTUUID=` 的 MBR 分支只支持主分区（`diskid-01`…`-04`），不支持扩展/逻辑分区；
+  GPT 只扫描前 128 个表项；GPT 的逻辑扇区大小会自动探测，4Kn 磁盘可用；
 - 不支持 LUKS/LVM（没有 cryptsetup/dm 初始化），也还没处理 `/usr` 单独挂载后
   切根前的 pivot 场景；
 - jiminit 不内置认证：没有 PAM，也不解析 `/etc/shadow`，完全依赖外部 `login`
@@ -240,6 +248,9 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - `root=` 只支持 `/dev` 路径、UUID、PARTUUID，不支持 LABEL；
 - 软重启只重新执行 stage2：initramfs 已经不在，内核也不会重新引导，所以
   `root=`/initramfs/内核参数相关的改动必须走真正的重启；
+- getty 反复启动失败时固定每 500ms 重拉一次，没有退避，会持续刷日志；
+- 配置文件的未知键被 serde 忽略，字段类型错误会让整份配置回退默认值（日志里有
+  warning），不会进入 rescue；
 - 软重启用 tmpfs 顶替 `/run`、`/tmp`，旧内容若原本在根文件系统上仍会占用空间
   （真重启才会回收）。
 

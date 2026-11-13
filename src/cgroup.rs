@@ -94,6 +94,88 @@ pub fn kill(name: &str) {
     let _ = std::fs::write(&path, "1\n");
 }
 
+/// Enable the cgroup v2 controllers we need, both at the root and in our
+/// subtree (a controller must be enabled in the parent before children can
+/// use it). Only controllers requested by service limits are touched.
+pub fn enable_controllers(controllers: &[&str]) -> Result<()> {
+    if !is_enabled() || controllers.is_empty() {
+        return Ok(());
+    }
+    let root = Path::new(CGROUP_ROOT);
+    let available = std::fs::read_to_string(root.join("cgroup.controllers"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for controller in controllers {
+        if !available.iter().any(|c| c == controller) {
+            crate::warn!("cgroup: controller `{controller}` is not available");
+            continue;
+        }
+        enable_one(root, controller)?;
+        enable_one(&root.join(SUBTREE), controller)?;
+        crate::info!("cgroup: enabled controller {controller}");
+    }
+    Ok(())
+}
+
+fn enable_one(dir: &Path, controller: &str) -> Result<()> {
+    let path = dir.join("cgroup.subtree_control");
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if current.split_whitespace().any(|c| c == controller) {
+        return Ok(());
+    }
+    std::fs::write(&path, format!("+{controller}\n"))
+        .with_context(|| format!("cannot enable {controller} in {}", path.display()))?;
+    Ok(())
+}
+
+/// Write the configured limits into the service cgroup. Invalid or
+/// unsupported values are logged and skipped rather than killing the service.
+pub fn configure(
+    name: &str,
+    memory_max: Option<&str>,
+    pids_max: Option<u64>,
+    cpu_max: Option<&str>,
+) {
+    let Some(dir) = service_dir(name) else {
+        return;
+    };
+    if let Some(value) = memory_max {
+        write_limit(&dir, "memory.max", value);
+    }
+    if let Some(value) = pids_max {
+        write_limit(&dir, "pids.max", &value.to_string());
+    }
+    if let Some(value) = cpu_max {
+        write_limit(&dir, "cpu.max", value);
+    }
+}
+
+fn write_limit(dir: &Path, file: &str, value: &str) {
+    let path = dir.join(file);
+    if let Err(e) = std::fs::write(&path, format!("{value}\n")) {
+        crate::warn!("cgroup: cannot write {}: {e}", path.display());
+    }
+}
+
+/// Number of OOM kills recorded for this service cgroup.
+pub fn oom_kill_count(name: &str) -> u64 {
+    let Some(dir) = service_dir(name) else {
+        return 0;
+    };
+    let text = std::fs::read_to_string(dir.join("memory.events")).unwrap_or_default();
+    text.lines()
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some("oom_kill"), Some(value)) => value.parse().ok(),
+                _ => None,
+            }
+        })
+        .unwrap_or(0)
+}
+
 pub fn remove(name: &str) {
     if !is_enabled() {
         return;

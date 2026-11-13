@@ -40,6 +40,25 @@ pub enum RestartPolicy {
     Never,
 }
 
+/// Resource limits applied through the service cgroup (v2 syntax).
+#[derive(Debug, Clone, Default)]
+pub struct Limits {
+    /// `memory.max`: bytes, optionally with a K/M/G/T suffix, or `max`.
+    pub memory_max: Option<String>,
+    /// `pids.max`: maximum number of tasks.
+    pub pids_max: Option<u64>,
+    /// `cpu.max`: `<quota> <period>` in microseconds.
+    pub cpu_max: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct LimitsFile {
+    memory_max: Option<String>,
+    pids_max: Option<u64>,
+    cpu_max: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServiceSpec {
     pub name: String,
@@ -61,6 +80,8 @@ pub struct ServiceSpec {
     pub supplementary_groups: Vec<String>,
     /// Wait for `READY=1` on the sd_notify socket before starting dependents.
     pub notify: bool,
+    /// cgroup v2 resource limits (empty means unlimited).
+    pub limits: Limits,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -79,6 +100,8 @@ struct ServiceFile {
     supplementary_groups: Vec<String>,
     #[serde(default)]
     notify: bool,
+    #[serde(default)]
+    limits: LimitsFile,
 }
 
 fn default_runlevels() -> Vec<Level> {
@@ -141,7 +164,52 @@ pub fn parse_service(name: &str, text: &str) -> Result<ServiceSpec> {
         group: file.group,
         supplementary_groups: file.supplementary_groups,
         notify: file.notify,
+        limits: parse_limits(name, file.limits)?,
     })
+}
+
+fn parse_limits(name: &str, file: LimitsFile) -> Result<Limits> {
+    let memory_max = file.memory_max.map(|v| v.trim().to_string());
+    if let Some(value) = &memory_max {
+        if !valid_memory_max(value) {
+            bail!(
+                "service `{name}` has an invalid `limits.memory_max` value `{value}`: \
+                 expected bytes with an optional K/M/G/T suffix, or `max`"
+            );
+        }
+    }
+    let cpu_max = file.cpu_max.map(|v| v.trim().to_string());
+    if let Some(value) = &cpu_max {
+        let parts: Vec<&str> = value.split_whitespace().collect();
+        let valid = parts.len() == 2
+            && parts.iter().all(|part| {
+                part.parse::<u64>()
+                    .map(|number| number > 0)
+                    .unwrap_or(false)
+            });
+        if !valid {
+            bail!(
+                "service `{name}` has an invalid `limits.cpu_max` value `{value}`: \
+                 expected \"<quota> <period>\" in microseconds"
+            );
+        }
+    }
+    Ok(Limits {
+        memory_max,
+        pids_max: file.pids_max,
+        cpu_max,
+    })
+}
+
+fn valid_memory_max(value: &str) -> bool {
+    if value == "max" {
+        return true;
+    }
+    let digits = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = &value[digits.len()..];
+    !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && matches!(suffix, "" | "k" | "K" | "m" | "M" | "g" | "G" | "t" | "T")
 }
 
 /// Split a command into words using shell-like quoting: whitespace separates
@@ -301,6 +369,8 @@ struct Running {
     ready: bool,
     /// When we stop waiting for READY=1 and treat the service as ready.
     ready_deadline: Option<Instant>,
+    /// Last `memory.events` oom_kill count we reported.
+    oom_seen: u64,
 }
 
 struct NotifyPipe {
@@ -370,6 +440,22 @@ impl Supervisor {
         // Keep only services that can be ordered, arranged in startup order so
         // that `stop()` can simply walk the vector backwards.
         services = order.iter().map(|&i| services[i].clone()).collect();
+
+        // Controllers are enabled only when a service actually asks for the
+        // corresponding limit; this keeps the rest of the system untouched.
+        let mut controllers = Vec::new();
+        if services.iter().any(|s| s.limits.memory_max.is_some()) {
+            controllers.push("memory");
+        }
+        if services.iter().any(|s| s.limits.pids_max.is_some()) {
+            controllers.push("pids");
+        }
+        if services.iter().any(|s| s.limits.cpu_max.is_some()) {
+            controllers.push("cpu");
+        }
+        if let Err(e) = crate::cgroup::enable_controllers(&controllers) {
+            crate::warn!("cgroup: {e:#}");
+        }
 
         crate::info!(
             "svc: loaded {} service(s) from {}",
@@ -521,6 +607,30 @@ impl Supervisor {
                 "svc/{}: no READY=1 within {} ms; assuming ready",
                 self.services[idx].name,
                 self.ready_timeout.as_millis()
+            );
+        }
+
+        // Report OOM kills recorded in the service cgroup. The exit itself is
+        // handled by the normal restart policy.
+        let mut oom = Vec::new();
+        for run in self.running.values() {
+            let spec = &self.services[run.idx];
+            if spec.limits.memory_max.is_none() {
+                continue;
+            }
+            let count = crate::cgroup::oom_kill_count(&spec.name);
+            if count > run.oom_seen {
+                oom.push((run.idx, count));
+            }
+        }
+        for (idx, count) in oom {
+            if let Some(run) = self.running.values_mut().find(|run| run.idx == idx) {
+                run.oom_seen = count;
+            }
+            crate::warn!(
+                "svc/{}: OOM-killed ({} total)",
+                self.services[idx].name,
+                count
             );
         }
 
@@ -720,6 +830,15 @@ impl Supervisor {
         } else {
             None
         };
+        // Create the cgroup and write limits before fork, so even a fast
+        // child cannot allocate beyond them.
+        crate::cgroup::configure(
+            &spec.name,
+            spec.limits.memory_max.as_deref(),
+            spec.limits.pids_max,
+            spec.limits.cpu_max.as_deref(),
+        );
+        let oom_seen = crate::cgroup::oom_kill_count(&spec.name);
 
         let (read_fd, write_fd) = pipe_cloexec().context("pipe")?;
         set_nonblocking(&read_fd);
@@ -745,6 +864,7 @@ impl Supervisor {
                         failures,
                         ready: !spec.notify,
                         ready_deadline,
+                        oom_seen,
                     },
                 );
                 crate::info!("svc/{}: started (pid {child})", spec.name);
@@ -772,6 +892,15 @@ impl Supervisor {
         }
 
         crate::info!("svc/{}: {} after {:?}", spec.name, describe(status), uptime);
+
+        // Read the OOM counter before the cgroup directory disappears: a
+        // service killed by the kernel may be reaped before the next tick.
+        if spec.limits.memory_max.is_some() {
+            let count = crate::cgroup::oom_kill_count(&spec.name);
+            if count > run.oom_seen {
+                crate::warn!("svc/{}: OOM-killed ({} total)", spec.name, count);
+            }
+        }
 
         // A stop requested through the control socket must not be undone by
         // the restart policy; an explicit restart starts once the exit is seen.
@@ -1128,6 +1257,55 @@ mod tests {
             group: None,
             supplementary_groups: Vec::new(),
             notify: false,
+            limits: Limits::default(),
+        }
+    }
+
+    #[test]
+    fn parses_limits() {
+        let svc = parse_service(
+            "demo",
+            "exec = \"/bin/sleep\"\nargs = [\"1\"]\n\
+             [limits]\nmemory_max = \"64M\"\npids_max = 64\n\
+             cpu_max = \"50000 100000\"\n",
+        )
+        .unwrap();
+        assert_eq!(svc.limits.memory_max.as_deref(), Some("64M"));
+        assert_eq!(svc.limits.pids_max, Some(64));
+        assert_eq!(svc.limits.cpu_max.as_deref(), Some("50000 100000"));
+    }
+
+    #[test]
+    fn accepts_memory_suffixes() {
+        for value in ["max", "1K", "2m", "3G", "4t", "1048576"] {
+            let text = format!("exec = \"/bin/true\"\n[limits]\nmemory_max = \"{value}\"\n");
+            assert!(parse_service("demo", &text).is_ok(), "value `{value}`");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_limits() {
+        for (text, needle) in [
+            (
+                "exec = \"/bin/true\"\n[limits]\nmemory_max = \"64 MB\"\n",
+                "memory_max",
+            ),
+            (
+                "exec = \"/bin/true\"\n[limits]\ncpu_max = \"50000\"\n",
+                "cpu_max",
+            ),
+            (
+                "exec = \"/bin/true\"\n[limits]\npids_max = -1\n",
+                "pids_max",
+            ),
+            (
+                "exec = \"/bin/true\"\n[limits]\nswap_max = \"1G\"\n",
+                "swap_max",
+            ),
+        ] {
+            let err = parse_service("demo", text).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains(needle), "{message}");
         }
     }
 

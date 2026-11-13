@@ -111,6 +111,27 @@ args = ["-c", "cat /proc/self/cgroup; sleep 600"]
 restart = "never"
 EOF
 
+cat > "$ROOT/etc/jiminit/services.d/limited.toml" <<'EOF'
+# Example: reports the limits written into its cgroup.
+exec = "/bin/sh"
+args = ["-c", "cat /sys/fs/cgroup/jiminit/limited/memory.max; cat /sys/fs/cgroup/jiminit/limited/pids.max; sleep 600"]
+restart = "never"
+
+[limits]
+memory_max = "8M"
+pids_max = 16
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/hog.toml" <<'EOF'
+# Example: allocates more than memory_max and gets OOM-killed.
+exec = "/bin/sh"
+args = ["-c", "x=$(head -c 20000000 /dev/zero | tr '\\000' x); echo allocated; sleep 600"]
+restart = "never"
+
+[limits]
+memory_max = "4M"
+EOF
+
 cat > "$ROOT/etc/jiminit/services.d/user.toml" <<'EOF'
 # Example: drops privileges to nobody.
 exec = "/bin/sh"

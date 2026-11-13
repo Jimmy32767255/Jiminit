@@ -169,6 +169,11 @@ user = "nobody"             # 以该用户运行（名字或数字 uid），默�
 group = "nogroup"           # 覆盖主组（名字或数字 gid）
 supplementary_groups = []   # 附加组；留空则用 /etc/group 里该用户的组
 notify = false              # true 时等待服务在 NOTIFY_SOCKET 上发 READY=1
+
+[limits]                    # 可选：cgroup v2 资源限制，缺省不限制
+memory_max = "64M"          # 字节或可选 K/M/G/T 后缀，或 "max"
+pids_max = 64               # 最多任务数
+cpu_max = "50000 100000"    # <quota> <period>，单位微秒
 ```
 
 启动语义：
@@ -186,6 +191,10 @@ notify = false              # true 时等待服务在 NOTIFY_SOCKET 上发 READY
   时用 `cgroup.kill` 连逃出进程组的孙进程一起杀；
 - `user`/`group` 只用 `/etc/passwd`、`/etc/group` 解析（不查 NSS），先
   `setgroups` 再 `setgid` 再 `setuid`，HOME/USER/LOGNAME 同步设置；
+- `[limits]` 通过 cgroup v2 施加 `memory_max`/`pids_max`/`cpu_max`；只有真有服务
+  设置某一项时才启用对应控制器（`+memory`/`+pids`/`+cpu`），写入失败只告警、
+  不会带崩服务；`memory_max` 触发的 OOM 从 `memory.events` 读出并记
+  `svc/<name>: OOM-killed (N total)`，随后照常交给 restart 策略；
 - 控制 socket 支持 `service <name> start|stop|restart|reload`；手动 stop 不会被重启
   策略覆盖，restart 等旧进程退出后再拉起；
 - 退出后按策略重启：连续失败从 1s 开始指数退避（2s、4s…上限 60s），连续 5 次失败后
@@ -275,6 +284,10 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
   依赖它的 `after` 在之后才 `started`；超时路径有单测/告警；
 - `jiminit --service after stop|start|restart` 分别输出 `ok after stopping/started/
   restarting`，停止后不会被重启策略拉起；`--service notifier reload` 发 SIGHUP；
+- `[limits]` 生效：`limited` 服务读回 `memory.max` 为 `8388608`、`pids.max` 为
+  `16`，对应控制器日志 `cgroup: enabled controller memory/pids`（按需启用）；
+- `hog` 服务（`memory_max = "4M"`）分配超限后被内核杀掉，日志出现
+  `svc/hog: OOM-killed (… total)`，`restart = "never"` 时不再拉起；
 - `jiminit --status` 返回 `status multi-user`；
 - 控制 socket 权限为 `0600`，非 root 用户无法查询或切换运行级；
 - `jiminit --runlevel single` → 停 getty/ticker → `now in runlevel single`，
@@ -298,11 +311,11 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 
 ### 已知限制
 
-- 模块只按 `/etc/modules` 显式加载，不做 udev 式的 modalias coldplug；
+- 模块只按 `/etc/modules` 显式加载，不在启动后处理 uevent 热插拔；
 - initramfs 必须自带 modprobe 和对应的 `/lib/modules/<kver>`（含 `modules.dep`，
   构建镜像时用 `depmod` 生成），jiminit 不负责生成模块依赖；
 - fsck 只检查根文件系统，且依赖 initramfs 里自带 `fsck` 程序（没有就跳过并记日志）；
-  真正可用的 e2fsprogs 还没打进测试镜像；
+  默认镜像不带 fsck，需要 `FSCK=1` 打包 e2fsprogs；
 - fstab 只用于 switch_root 前挂载根以外的条目：不支持 `LABEL=`/`/dev/disk/by-*`，
   不处理 swap，也不自动创建挂载点；
 - fstab 里不认识的选项按文件系统参数透传（`data=journal` 之类可用；拼错的选项会
@@ -320,13 +333,14 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
   `COLDPLUG_MODULES` 决定，默认为常见存储/文件系统驱动；
 - 打包真实 fsck 时只带 e2fsprogs（ext2/3/4），xfs/btrfs 的检查工具没有打包；
 - `/usr` 不会像 systemd 那样自动探测并挂载：必须写在 `/etc/fstab` 里；
-- 也还没处理 `/usr` 单独挂载后切根前的 pivot 场景；
 - jiminit 不内置认证：没有 PAM，也不解析 `/etc/shadow`，完全依赖外部 `login`
   （测试镜像里是 busybox）；替换成 util-linux login/agetty 时应同样可用；
 - 运行级只有三个固定级别，没有 SysV 的任意 rcN.d 脚本目录，也没有 inittab；
 - VT 之间切换只能靠内核快捷键，jiminit 不处理 `chvt`/键盘；
-- 服务没有就绪探测（没有 sd_notify 之类），依赖只保证启动顺序；
-- 服务没有 cgroup 隔离，也不切换用户/组运行；
+- 资源限制只有 `memory.max`/`pids.max`/`cpu.max`，没有 io.max、cpuset、权重，
+  也没有全局默认限制；
+- OOM 靠主循环轮询 `memory.events` 发现（不是事件驱动）；cgroup 目录回收后计数
+  归零，只用于日志提示，重启决策仍由退出状态和 restart 策略决定；
 - 只支持 x86_64 上验证过的路径，其他架构未测试；
 - `root=` 只支持 `/dev` 路径、UUID、PARTUUID，不支持 LABEL；
 - 软重启只重新执行 stage2：initramfs 已经不在，内核也不会重新引导，所以

@@ -21,7 +21,7 @@ fi
 
 rm -rf "$ROOT"
 mkdir -p "$ROOT/bin" "$ROOT/sbin" "$ROOT/etc" "$ROOT/root" "$ROOT/proc" \
-    "$ROOT/sys" "$ROOT/dev" "$ROOT/tmp" "$ROOT/run"
+    "$ROOT/sys" "$ROOT/dev" "$ROOT/tmp" "$ROOT/run" "$ROOT/etc/jiminit/services.d"
 install -m755 "$OUT/jiminit" "$ROOT/sbin/jiminit"
 ln -sf sbin/jiminit "$ROOT/init"
 install -m755 "$BUSYBOX" "$ROOT/bin/busybox"
@@ -40,6 +40,20 @@ shell = "/bin/sh"
 respawn = true
 shutdown_timeout_ms = 3000
 init_path = "/sbin/jiminit"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/ticker.toml" <<'EOF'
+# Example service: prints one line per second. Exercised by the smoke test.
+exec = "/bin/sh"
+args = ["-c", "while true; do echo tick; sleep 1; done"]
+restart = "always"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/failer.toml" <<'EOF'
+# Example service: always fails, to exercise the backoff restart logic.
+exec = "/bin/sh"
+args = ["-c", "echo failing; exit 1"]
+restart = "on-failure"
 EOF
 
 rm -f "$IMAGE"

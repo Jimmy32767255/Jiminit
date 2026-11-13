@@ -21,6 +21,8 @@ pub struct Config {
     pub shutdown_timeout_ms: u64,
     /// Path of the stage 2 binary inside the real root filesystem.
     pub init_path: String,
+    /// Directory with `*.toml` service definitions.
+    pub services_dir: String,
 }
 
 impl Default for Config {
@@ -32,6 +34,7 @@ impl Default for Config {
             respawn: true,
             shutdown_timeout_ms: 3000,
             init_path: "/sbin/jiminit".to_string(),
+            services_dir: crate::service::DEFAULT_DIR.to_string(),
         }
     }
 }
@@ -71,6 +74,7 @@ mod tests {
         assert!(cfg.respawn);
         assert_eq!(cfg.shutdown_timeout_ms, 3000);
         assert_eq!(cfg.init_path, "/sbin/jiminit");
+        assert_eq!(cfg.services_dir, "/etc/jiminit/services.d");
     }
 
     #[test]

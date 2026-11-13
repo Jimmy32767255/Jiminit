@@ -1,20 +1,27 @@
-//! Stage 2: PID 1 on the real root. Sets up the console, runs a root shell,
-//! reaps orphans and performs an orderly shutdown or reboot.
+//! Stage 2: PID 1 on the real root. Sets up the console, supervises services,
+//! runs a root shell, reaps orphans and performs an orderly shutdown/reboot.
 
 use crate::config::Config;
+use crate::service::Supervisor;
 use anyhow::{Context, Result};
 use nix::errno::Errno;
 use nix::fcntl::{open, OFlag};
+use nix::poll::{poll, PollFd, PollFlags};
 use nix::sys::signal::{kill, SigSet, Signal};
+use nix::sys::signalfd::{SfdFlags, SignalFd};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{fork, setsid, ForkResult, Pid};
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// How often the main loop wakes up even without a signal or service output,
+/// so pending restarts and shutdown deadlines are processed on time.
+const LOOP_TIMEOUT_MS: u16 = 100;
 
 pub fn run() -> Result<()> {
     crate::log::init();
@@ -26,45 +33,78 @@ pub fn run() -> Result<()> {
     set_hostname(&cfg.hostname);
     setup_console(&cfg.console);
     let signals = block_signals()?;
+    let signal_fd = SignalFd::with_flags(
+        &signals.set,
+        SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC,
+    )
+    .context("signalfd")?;
+
+    let mut supervisor = Supervisor::new(Path::new(&cfg.services_dir));
+    supervisor.start_all();
 
     let mut shell = spawn_shell(&cfg)?;
 
     loop {
-        let signal = signals.set.wait().context("sigwaitinfo")?;
-        match signal {
-            Signal::SIGCHLD => {
-                let exited = reap_all();
-                for status in &exited {
-                    crate::info!("reaped: {}", describe(status));
+        // Wake on a signal, on service output, or after the timeout.
+        {
+            let mut pollfds = Vec::with_capacity(1 + supervisor.log_count());
+            pollfds.push(PollFd::new(signal_fd.as_fd(), PollFlags::POLLIN));
+            for fd in supervisor.log_fds() {
+                pollfds.push(PollFd::new(fd, PollFlags::POLLIN));
+            }
+            let _ = poll(&mut pollfds, LOOP_TIMEOUT_MS);
+        }
+        supervisor.drain_logs();
+
+        while let Some(info) = signal_fd.read_signal().context("read signalfd")? {
+            match info.ssi_signo as i32 {
+                libc::SIGINT => {
+                    crate::info!("SIGINT (ctrl-alt-del): rebooting");
+                    return shutdown(&cfg, &mut supervisor, shell, Action::Reboot);
                 }
-                let shell_exited = exited.iter().any(|status| status.pid() == Some(shell));
-                if shell_exited {
-                    crate::warn!("root shell {shell} exited");
-                    if cfg.respawn {
-                        std::thread::sleep(Duration::from_millis(500));
-                        match spawn_shell(&cfg) {
-                            Ok(pid) => shell = pid,
-                            Err(e) => crate::err!("cannot respawn the root shell: {e:#}"),
-                        }
-                    } else {
-                        crate::info!("respawn is disabled; shutting down");
-                        return shutdown(&cfg, Action::PowerOff);
+                libc::SIGTERM => {
+                    crate::info!("SIGTERM: powering off");
+                    return shutdown(&cfg, &mut supervisor, shell, Action::PowerOff);
+                }
+                libc::SIGCHLD => {}
+                libc::SIGQUIT | libc::SIGHUP => {
+                    crate::info!("ignoring signal {}", info.ssi_signo)
+                }
+                other => crate::info!("unexpected signal {other}"),
+            }
+        }
+
+        // Reap on every wakeup rather than only on SIGCHLD, so a coalesced
+        // signal can never leave zombies behind.
+        let (exited, _) = reap_all();
+        let mut shell_exited = false;
+        for status in &exited {
+            match status.pid() {
+                Some(pid) if pid == shell => shell_exited = true,
+                Some(pid) => {
+                    if !supervisor.handle_exit(pid, status) {
+                        crate::info!("reaped: {}", describe(status));
                     }
                 }
+                None => crate::info!("reaped: {}", describe(status)),
             }
-            Signal::SIGINT => {
-                crate::info!("SIGINT (ctrl-alt-del): rebooting");
-                return shutdown(&cfg, Action::Reboot);
-            }
-            Signal::SIGTERM => {
-                crate::info!("SIGTERM: powering off");
-                return shutdown(&cfg, Action::PowerOff);
-            }
-            Signal::SIGQUIT | Signal::SIGHUP => {
-                crate::info!("ignoring {signal}");
-            }
-            other => crate::info!("unexpected signal {other}"),
         }
+
+        if shell_exited {
+            crate::warn!("root shell {shell} exited");
+            if cfg.respawn {
+                std::thread::sleep(Duration::from_millis(500));
+                match spawn_shell(&cfg) {
+                    Ok(pid) => shell = pid,
+                    Err(e) => crate::err!("cannot respawn the root shell: {e:#}"),
+                }
+            } else {
+                crate::info!("respawn is disabled; shutting down");
+                return shutdown(&cfg, &mut supervisor, shell, Action::PowerOff);
+            }
+        }
+
+        supervisor.tick();
     }
 }
 
@@ -169,7 +209,7 @@ fn spawn_shell(cfg: &Config) -> Result<Pid> {
 /// terminal, then exec it. Never returns.
 fn child_shell(console: &str, shell: &str) -> ! {
     // The shell must not inherit the signals blocked for PID 1.
-    let _ = SigSet::empty().thread_unblock();
+    clear_signal_mask();
 
     let _ = setsid();
     attach_console(console);
@@ -185,6 +225,16 @@ fn child_shell(console: &str, shell: &str) -> ! {
     unsafe { libc::_exit(127) }
 }
 
+/// Clear the inherited signal mask (`SIG_SETMASK` with an empty set).
+fn clear_signal_mask() {
+    let empty = SigSet::empty();
+    let _ = nix::sys::signal::sigprocmask(
+        nix::sys::signal::SigmaskHow::SIG_SETMASK,
+        Some(&empty),
+        None,
+    );
+}
+
 fn shell_env(shell: &str) -> Vec<CString> {
     let mut vars: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     for (key, value) in std::env::vars_os() {
@@ -198,7 +248,10 @@ fn shell_env(shell: &str) -> Vec<CString> {
         vars.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec());
     };
     set("HOME", "/root");
-    set("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    set(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
     set("SHELL", shell);
     set("TERM", "linux");
     set("PS1", "jiminit:\\w# ");
@@ -212,20 +265,21 @@ fn shell_env(shell: &str) -> Vec<CString> {
         .collect()
 }
 
-fn reap_all() -> Vec<WaitStatus> {
+/// Reap all exited children. The boolean is true when there are no children
+/// left at all (ECHILD).
+fn reap_all() -> (Vec<WaitStatus>, bool) {
     let mut reaped = Vec::new();
     loop {
         match waitpid(None::<Pid>, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => break,
+            Ok(WaitStatus::StillAlive) => return (reaped, false),
             Ok(status) => reaped.push(status),
-            Err(Errno::ECHILD) => break,
+            Err(Errno::ECHILD) => return (reaped, true),
             Err(e) => {
                 crate::warn!("waitpid failed: {e}");
-                break;
+                return (reaped, false);
             }
         }
     }
-    reaped
 }
 
 fn describe(status: &WaitStatus) -> String {
@@ -245,32 +299,58 @@ enum Action {
     Reboot,
 }
 
-fn shutdown(cfg: &Config, mode: Action) -> Result<()> {
-    crate::info!("shutting down ({mode:?}): sending SIGTERM to all processes");
-    let _ = kill(Pid::from_raw(-1), Signal::SIGTERM);
+fn shutdown(
+    cfg: &Config,
+    supervisor: &mut Supervisor,
+    shell: Pid,
+    mode: Action,
+) -> Result<()> {
+    crate::info!(
+        "shutting down ({mode:?}): stopping shell and {} service(s)",
+        supervisor.running_count()
+    );
+    // Interactive shells ignore SIGTERM, so hang up the session instead; the
+    // rest of the system gets a graceful SIGTERM.
+    let _ = kill(shell, Signal::SIGHUP);
+    supervisor.stop();
 
+    // Phase 1: give everything shutdown_timeout_ms to exit after SIGTERM.
+    // Phase 2: SIGKILL whatever is left, then wait a little longer.
     let deadline = Instant::now() + Duration::from_millis(cfg.shutdown_timeout_ms);
+    let mut hard_deadline: Option<Instant> = None;
     loop {
-        match waitpid(None::<Pid>, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => {
-                if Instant::now() >= deadline {
-                    crate::warn!("timed out waiting for processes; sending SIGKILL");
-                    break;
+        let (exited, all_gone) = reap_all();
+        for status in &exited {
+            match status.pid() {
+                Some(pid) if !supervisor.handle_exit(pid, status) => {
+                    crate::info!("reaped: {}", describe(status))
                 }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Ok(status) => crate::info!("reaped: {}", describe(&status)),
-            Err(Errno::ECHILD) => break,
-            Err(e) => {
-                crate::warn!("waitpid failed: {e}");
-                break;
+                None => crate::info!("reaped: {}", describe(status)),
+                Some(_) => {}
             }
         }
-    }
+        supervisor.drain_logs();
 
-    let _ = kill(Pid::from_raw(-1), Signal::SIGKILL);
-    std::thread::sleep(Duration::from_millis(100));
-    let _ = reap_all();
+        if all_gone {
+            break;
+        }
+
+        let now = Instant::now();
+        match hard_deadline {
+            None if now >= deadline => {
+                crate::warn!("timed out waiting for processes; sending SIGKILL");
+                supervisor.kill_all();
+                let _ = kill(Pid::from_raw(-1), Signal::SIGKILL);
+                hard_deadline = Some(now + Duration::from_secs(2));
+            }
+            Some(hard) if now >= hard => {
+                crate::warn!("processes survived SIGKILL; continuing anyway");
+                break;
+            }
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     crate::info!("flushing filesystems");
     nix::unistd::sync();

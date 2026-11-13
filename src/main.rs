@@ -4,7 +4,7 @@
 //! * initramfs stage 1 (`root=` on the kernel command line): mount the real
 //!   root and switch_root into it.
 //! * root stage 2 (PID 1 on the final root): hostname, console, root shell,
-//!   reaping and shutdown.
+//!   service supervision, reaping and shutdown.
 //!
 //! PID 1 must never exit, so every failure ends up in a rescue shell loop.
 
@@ -13,6 +13,7 @@ mod config;
 mod log;
 mod mount;
 mod rootdev;
+mod service;
 mod stage1;
 mod stage2;
 

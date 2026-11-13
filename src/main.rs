@@ -12,6 +12,7 @@
 
 mod cmdline;
 mod config;
+mod fstab;
 mod log;
 mod mount;
 mod rootdev;

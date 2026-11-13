@@ -21,8 +21,8 @@ fi
 
 rm -rf "$ROOT"
 mkdir -p "$ROOT/bin" "$ROOT/sbin" "$ROOT/etc" "$ROOT/root" "$ROOT/proc" \
-    "$ROOT/sys" "$ROOT/dev" "$ROOT/tmp" "$ROOT/run" "$ROOT/var/run" "$ROOT/var/log" \
-    "$ROOT/etc/jiminit/services.d"
+    "$ROOT/sys" "$ROOT/dev" "$ROOT/tmp" "$ROOT/run" "$ROOT/data" \
+    "$ROOT/var/run" "$ROOT/var/log" "$ROOT/etc/jiminit/services.d"
 install -m755 "$OUT/jiminit" "$ROOT/sbin/jiminit"
 ln -sf sbin/jiminit "$ROOT/init"
 install -m755 "$BUSYBOX" "$ROOT/bin/busybox"
@@ -79,6 +79,11 @@ getty_baud = "38400"
 serial_getty_baud = "115200"
 ttys = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
 serial_ttys = ["/dev/ttyS0"]
+EOF
+
+cat > "$ROOT/etc/fstab" <<'EOF'
+# Extra filesystems mounted by stage 1 from the initramfs.
+tmpfs /data tmpfs nosuid,nodev,nofail 0 0
 EOF
 
 cat > "$ROOT/etc/jiminit/services.d/ticker.toml" <<'EOF'

@@ -58,7 +58,7 @@ login() {
 }
 
 ./scripts/build.sh >/dev/null
-./scripts/mk-initramfs.sh >/dev/null
+FSCK_STUB=1 ./scripts/mk-initramfs.sh >/dev/null
 ./scripts/mk-rootfs.sh >/dev/null
 
 rm -f "$FIFO" "$LOG"
@@ -119,6 +119,9 @@ done
 wait "$qpid" || true
 
 grep -q 'moved new root onto /' "$LOG" || fail "switch_root did not run"
+grep -q 'stub-fsck: -p /dev/vda' "$LOG" || fail "fsck was not run before mounting the root"
+grep -q 'fsck: exited with 0' "$LOG" || fail "fsck result was not checked"
+grep -q 'fstab: mounted tmpfs on /newroot/data' "$LOG" || fail "fstab entry was not mounted"
 grep -q 'stage2: starting as pid 1' "$LOG" || fail "stage2 did not start as PID 1"
 grep -q 'hostname set to jiminit-qemu' "$LOG" || fail "config file was not applied"
 grep -q 'started getty on /dev/ttyS0' "$LOG" || fail "getty did not start on the serial console"

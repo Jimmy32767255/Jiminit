@@ -2,8 +2,8 @@
 
 一个个人实验性的 GNU/Linux init 系统实现方案：用 Rust 写的、单二进制的 PID 1。
 
-当前功能：作为 initramfs 的 `/init` 挂载真实根并 `switch_root`，也能直接作为系统根上的
-`init=` 使用；挂载伪文件系统、设置 hostname、按依赖启动并看护 `/etc/jiminit/services.d`
+当前功能：作为 initramfs 的 `/init` 检查（`fsck -p`）、挂载真实根、按 `/etc/fstab`
+挂载额外文件系统并 `switch_root`，也能直接作为系统根上的 `init=` 使用；挂载伪文件系统、设置 hostname、按依赖启动并看护 `/etc/jiminit/services.d`
 里的服务、在多个 tty 上拉起 getty 交由外部 login 认证、支持运行级切换、回收孤儿进程，
 并在收到信号时有序关机/重启。
 
@@ -17,6 +17,7 @@ src/
   runlevel.rs single / multi-user / graphical 运行级与数字别名
   service.rs  服务监督：TOML 解析、依赖拓扑、重启退避、日志转发、停机
   rootdev.rs  根设备解析：/dev 路径、UUID=、PARTUUID=
+  fstab.rs    /etc/fstab 解析（switch_root 前挂载额外文件系统）
   config.rs   /etc/jiminit.toml 配置
   cmdline.rs  /proc/cmdline 解析
   mount.rs    挂载辅助
@@ -46,11 +47,17 @@ scripts/
    - `rootflags=` 透传给 mount；
    - `rw`：默认只读挂载，出现 `rw` 才读写；
 3. 设备节点可能还没就绪，所以按 20 次 × 250ms 重试；
-4. 挂载到 `/newroot`，校验 `/newroot/sbin/jiminit` 存在；
-5. 把 `/dev`、`/proc`、`/sys` 的挂载点 MS_MOVE 进新根；
-6. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
+4. 挂载前对根设备执行 `fsck -p`：initramfs 里找得到 `/sbin/fsck`（或 `/bin`、
+   `/usr/sbin`、`/usr/bin`）才执行，`fsck=no` 可在内核命令行关闭；退出码 4/8/16/32
+   等视为失败，拒绝挂载并进入 rescue（0/1/2 视为可用）；
+5. 挂载到 `/newroot`，读取 `/newroot/etc/fstab`，把根以外的条目（跳过 swap、伪文件
+   系统、`noauto` 和重复挂载点）挂到 `/newroot/<mountpoint>`；`nofail` 的失败只告警，
+   其余失败中止启动；
+6. 校验 `/newroot/sbin/jiminit` 存在；
+7. 把 `/dev`、`/proc`、`/sys` 的挂载点 MS_MOVE 进新根；
+8. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
    （与 busybox switch_root 相同的收尾，缺 `chroot(".")` 会导致后续 exec 仍看旧根）；
-7. `execve("/sbin/jiminit", ["--stage2"])`。
+9. `execve("/sbin/jiminit", ["--stage2"])`。
 
 ### stage2（PID 1）
 
@@ -164,6 +171,7 @@ serial_ttys = ["/dev/ttyS0"]       # 不存在的设备会被跳过
 ./scripts/mk-rootfs.sh       # 生成 out/rootfs.ext4
 ./scripts/run-qemu.sh        # 交互式启动（ctrl-a x 退出）
 ./scripts/smoke-test.sh      # 自动验证并输出 PASS/FAIL
+                             # （mk-initramfs 支持 FSCK_STUB=1 注入 stub fsck）
 ```
 
 QEMU 磁盘用 virtio（`/dev/vda`），因为宿主内核里 `ata_piix` 是模块而 virtio-blk
@@ -181,6 +189,8 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - 读取 `/etc/jiminit.toml`（hostname 生效）、`/proc/1/comm` 为 `jiminit`；
 - 串口 console 上出现 `jiminit-qemu login:`，用 root/`jiminit` 经 busybox `login`
   登录后得到 root shell（`id` 显示 `uid=0(root)`）；默认还在 tty1–tty6 起了 getty；
+- stage1 在挂载根之前调用 `fsck -p`（冒烟测试用 stub fsck 验证调用与退出码判定），
+  并按 `/etc/fstab` 挂载了 `tmpfs /data`；
 - 服务：`ticker` 每秒输出并被转发到 kmsg（`svc/ticker: tick`）；
   `failer` 退出码 1 后按 1s→2s→4s 退避重启；关机时 `ticker` 收到 SIGTERM 退出；
 - `jiminit --status` 返回 `status multi-user`；
@@ -200,7 +210,12 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 ### 已知限制
 
 - 不加载内核模块，因此只能用内建的文件系统和磁盘驱动（真实 initramfs 需要在这里加模块加载）；
-- 不做 fsck，不处理 `/etc/fstab`；
+- fsck 只检查根文件系统，且依赖 initramfs 里自带 `fsck` 程序（没有就跳过并记日志）；
+  真正可用的 e2fsprogs 还没打进测试镜像；
+- fstab 只用于 switch_root 前挂载根以外的条目：不支持 `LABEL=`/`/dev/disk/by-*`，
+  不处理 swap，也不做挂载点自动创建；
+- 不支持 LUKS/LVM（没有 cryptsetup/dm 初始化），也还没处理 `/usr` 单独挂载后
+  切根前的 pivot 场景；
 - jiminit 不内置认证：没有 PAM，也不解析 `/etc/shadow`，完全依赖外部 `login`
   （测试镜像里是 busybox）；替换成 util-linux login/agetty 时应同样可用；
 - 运行级只有三个固定级别，没有 SysV 的任意 rcN.d 脚本目录，也没有 inittab；
@@ -216,11 +231,12 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 
 ## 设计取舍
 
-依赖只引入 `nix` + `serde`/`toml` + `anyhow`，其余（cmdline、UUID/GPT 解析、
-switch_root、signalfd 主循环、服务监督）都自己实现，便于后续替换或精简。
+依赖只引入 `nix` + `serde`/`toml` + `anyhow`，其余（cmdline、UUID/GPT 解析、fstab、
+fsck 调用与退出码判定、switch_root、signalfd 主循环、服务监督）都自己实现，便于后续
+替换或精简。
 PID 1 主循环用 `signalfd` + `poll` 而不是线程，避免在多线程进程里 fork 的风险；
 服务日志通过管道回到主循环带前缀写入 kmsg，同样不需要额外线程。
 
 具体决策点（QEMU 验证、TOML 配置、init 接管关机、UUID/PARTUUID、服务格式/依赖启动/
-重启策略/日志去向、getty+外部 login、三个命名运行级、控制 socket 切换）都是和需求方
-逐项确认后定下的。
+重启策略/日志去向、getty+外部 login、三个命名运行级、控制 socket 切换、fstab 范围、
+fsck 策略）都是和需求方逐项确认后定下的。

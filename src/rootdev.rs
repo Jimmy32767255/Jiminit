@@ -143,6 +143,16 @@ fn read_head(path: &Path, len: usize) -> Option<Vec<u8>> {
 
 /// Detect a filesystem UUID from a leading sample of a block device.
 pub fn uuid_from_sample(buf: &[u8]) -> Option<String> {
+    // LUKS1/LUKS2 containers: magic at 0, UUID string at 0xa8 (40 bytes).
+    if buf.len() >= 0xa8 + 40 && &buf[0..6] == b"LUKS\xba\xbe" {
+        let raw = &buf[0xa8..0xa8 + 40];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        let uuid = std::str::from_utf8(&raw[..end]).ok()?.trim();
+        if !uuid.is_empty() {
+            return Some(uuid.to_string());
+        }
+    }
+
     // ext2/3/4: superblock at 1024, magic 0xEF53 at +0x38, UUID at +0x68.
     if buf.len() >= 1024 + 0x78 {
         let sb = &buf[1024..];
@@ -423,5 +433,17 @@ mod tests {
             Some(1)
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn detects_luks_uuid() {
+        let mut sample = vec![0u8; 0x1000];
+        sample[..6].copy_from_slice(b"LUKS\xba\xbe");
+        let uuid = b"a5737d39-3624-4565-9d36-1d198b748a7d";
+        sample[0xa8..0xa8 + uuid.len()].copy_from_slice(uuid);
+        assert_eq!(
+            uuid_from_sample(&sample).as_deref(),
+            Some("a5737d39-3624-4565-9d36-1d198b748a7d")
+        );
     }
 }

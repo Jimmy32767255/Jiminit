@@ -12,8 +12,10 @@
 
 mod cmdline;
 mod config;
+mod crypttab;
 mod fstab;
 mod log;
+mod luks;
 mod modules;
 mod mount;
 mod rootdev;

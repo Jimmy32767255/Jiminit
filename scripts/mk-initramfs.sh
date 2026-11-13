@@ -27,6 +27,34 @@ for applet in sh mount umount cat ls echo sleep dmesg; do
     ln -sf busybox "$ROOT/bin/$applet"
 done
 
+# Copy a dynamically linked program and every shared library ldd reports.
+copy_with_libs() {
+    src=$1
+    [ -e "$src" ] || { echo "missing $src" >&2; exit 1; }
+    mkdir -p "$ROOT$(dirname "$src")"
+    cp -L "$src" "$ROOT$src"
+    ldd "$src" > "$OUT/ldd.tmp"
+    while read -r line; do
+        case "$line" in
+            *"=>"*) lib=$(printf '%s\n' "$line" | awk '{print $3}') ;;
+            /*)     lib=$(printf '%s\n' "$line" | awk '{print $1}') ;;
+            *)      continue ;;
+        esac
+        [ -n "$lib" ] && [ -e "$lib" ] || continue
+        mkdir -p "$ROOT$(dirname "$lib")"
+        cp -L "$lib" "$ROOT$lib"
+    done < "$OUT/ldd.tmp"
+    rm -f "$OUT/ldd.tmp"
+    # ldd reports the loader under its resolved path, but the binary asks for
+    # the path recorded in PT_INTERP (e.g. /lib64/ld-linux-x86-64.so.2).
+    interp=$(readelf -l "$src" 2>/dev/null |
+        sed -n 's/.*Requesting program interpreter: \(.*\)\]/\1/p')
+    if [ -n "$interp" ] && [ -e "$interp" ]; then
+        mkdir -p "$ROOT$(dirname "$interp")"
+        cp -L "$interp" "$ROOT$interp"
+    fi
+}
+
 # The smoke test uses a stub fsck to exercise the "fsck available" path
 # without shipping a full e2fsprogs in the initramfs.
 if [ "${FSCK_STUB:-0}" = "1" ]; then
@@ -69,6 +97,66 @@ EOF
         echo "exit 0" >> "$ROOT/sbin/modprobe"
     fi
     chmod 755 "$ROOT/sbin/modprobe"
+fi
+
+# Packaging for an encrypted (and optionally LVM) root: the real cryptsetup,
+# lvm and modprobe binaries plus their libraries, the device-mapper kernel
+# modules and the crypttab. This keeps the default image small.
+if [ "${LUKS:-0}" = "1" ]; then
+    for program in /usr/bin/cryptsetup /usr/bin/lvm; do
+        copy_with_libs "$program"
+    done
+    ln -sf /usr/bin/cryptsetup "$ROOT/sbin/cryptsetup"
+    ln -sf /usr/bin/lvm "$ROOT/sbin/lvm"
+
+    # kmod's modprobe understands the modules.dep index, unlike staged
+    # busybox modprobe variants; stage 1 needs it to load dm_mod/dm_crypt.
+    KMOD_MODPROBE=${KMOD_MODPROBE:-$(command -v modprobe)}
+    copy_with_libs "$KMOD_MODPROBE"
+    if [ "$KMOD_MODPROBE" != /usr/bin/modprobe ]; then
+        mkdir -p "$ROOT/usr/bin"
+        cp -L "$KMOD_MODPROBE" "$ROOT/usr/bin/modprobe"
+    fi
+
+    mkdir -p "$ROOT/etc/lvm/archive" "$ROOT/etc/lvm/backup" "$ROOT/run" \
+        "$ROOT/etc/lvm"
+    cat > "$ROOT/etc/lvm/lvm.conf" <<'EOF'
+# Initramfs LVM: no udev, no devices file.
+devices {
+    use_devicesfile = 0
+    obtain_device_list_from_udev = 0
+}
+activation {
+    udev_sync = 0
+    udev_rules = 0
+}
+EOF
+
+    kmod_dir="/lib/modules/$(uname -r)"
+    {
+        modprobe --show-depends dm_mod
+        modprobe --show-depends dm_crypt
+    } | awk '$1 == "insmod" {print $2}' | sort -u > "$OUT/kmods.tmp"
+    while read -r module; do
+        mkdir -p "$ROOT$(dirname "$module")"
+        cp "$module" "$ROOT$module"
+    done < "$OUT/kmods.tmp"
+    rm -f "$OUT/kmods.tmp"
+    for name in modules.dep modules.dep.bin modules.builtin modules.builtin.bin \
+        modules.alias modules.alias.bin; do
+        if [ -f "$kmod_dir/$name" ]; then
+            mkdir -p "$ROOT$kmod_dir"
+            cp "$kmod_dir/$name" "$ROOT$kmod_dir/$name"
+        fi
+    done
+
+    mkdir -p "$ROOT/etc"
+    printf '# device-mapper and dm-crypt for LUKS/LVM\ndm_mod\ndm_crypt\n' \
+        > "$ROOT/etc/modules"
+
+    if [ -n "${CRYPTAB:-}" ]; then
+        install -m644 "$CRYPTAB" "$ROOT/etc/crypttab"
+    fi
 fi
 
 # Write the cpio archive first so a cpio failure is not hidden by gzip's

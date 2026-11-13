@@ -19,7 +19,10 @@ pub fn run() -> Result<()> {
         Path::new(crate::modules::MODPROBE_DIR),
     )?;
 
+    crate::luks::unlock_all(Path::new(crate::luks::CRYPTTAB))?;
+
     let cmdline = crate::cmdline::Cmdline::read().context("read /proc/cmdline")?;
+    activate_lvm(&cmdline)?;
 
     let root_spec = cmdline
         .value("root")
@@ -98,6 +101,44 @@ pub fn run() -> Result<()> {
 
     // exec only returns on failure.
     unreachable!()
+}
+
+/// Activate LVM volume groups when the kernel command line asks for it.
+///
+/// Only `lvm=1` (or `lvm`) or a `root=/dev/mapper/...` triggers activation:
+/// scanning all VGs costs time and can activate volumes unrelated to boot.
+fn activate_lvm(cmdline: &crate::cmdline::Cmdline) -> Result<()> {
+    let root = cmdline.value("root").unwrap_or("");
+    let mapper_root = root.starts_with("/dev/mapper/");
+    let requested = cmdline.has("lvm") || cmdline.value("lvm") == Some("1");
+    if !mapper_root && !requested {
+        return Ok(());
+    }
+    if mapper_root && Path::new(root).exists() {
+        crate::info!("lvm: {root} already exists; not activating volume groups");
+        return Ok(());
+    }
+
+    let Some(program) = find_lvm() else {
+        bail!("LVM activation is requested (root={root}) but no lvm program is in the initramfs");
+    };
+
+    crate::info!("lvm: activating volume groups ({program} vgchange -ay)");
+    let status = std::process::Command::new(program)
+        .args(["vgchange", "-ay"])
+        .status()
+        .context("run lvm vgchange -ay")?;
+    if !status.success() {
+        bail!("lvm vgchange -ay failed: {status}");
+    }
+    crate::info!("lvm: volume groups activated");
+    Ok(())
+}
+
+fn find_lvm() -> Option<&'static str> {
+    ["/sbin/lvm", "/bin/lvm", "/usr/sbin/lvm", "/usr/bin/lvm"]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).is_file())
 }
 
 /// Run `fsck -p` on the root device before mounting it.

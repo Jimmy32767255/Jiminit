@@ -20,6 +20,8 @@ src/
   rootdev.rs  根设备解析：/dev 路径、UUID=、PARTUUID=
   modules.rs  /etc/modules + modprobe.d 规则，加载根设备所需的内核模块
   fstab.rs    /etc/fstab 解析（switch_root 前挂载额外文件系统）
+  crypttab.rs /etc/crypttab 解析
+  luks.rs     cryptsetup 解锁（重试 3 次）
   config.rs   /etc/jiminit.toml 配置
   cmdline.rs  /proc/cmdline 解析
   mount.rs    挂载辅助
@@ -30,6 +32,8 @@ scripts/
   mk-rootfs.sh     生成 ext4 根镜像（jiminit + busybox + 配置 + 示例服务）
   run-qemu.sh      交互式启动测试
   smoke-test.sh    自动冒烟测试
+  mk-luks-image.sh LUKS + LVM 根镜像（需要 root）
+  smoke-luks-test.sh LUKS/LVM 自动冒烟测试
 ```
 
 ## 工作方式
@@ -49,28 +53,34 @@ scripts/
    一致，只拦截 alias 解析——显式写在 `/etc/modules` 里的模块仍会加载（否则被
    blacklist 的存储驱动会让根设备直接不可达），单条 modprobe/install 命令超过 30s
    会被杀掉并判定失败；
-3. 解析内核命令行：
+3. 按 initramfs 里的 `/etc/crypttab` 逐个解锁 LUKS 容器（`name device keyfile
+   options`，`keyfile` 为 `none`/`-` 时交互输入口令）。设备名支持 `/dev/*`、`UUID=`、
+   `PARTUUID=`；每个容器最多尝试 3 次，仍失败则中止启动进入 rescue。`options` 只识别
+   `discard`、`readonly`、`keyslot=N`、`header=PATH`（未知项告警忽略）；
+4. 需要时激活 LVM：仅当命令行有 `lvm=1`/`lvm` 或 `root=/dev/mapper/...` 时才执行
+   `lvm vgchange -ay`（先确认该 mapper 不存在），失败则进入 rescue；
+5. 解析内核命令行：
    - `root=`：`/dev/xxx`、`UUID=...`、`PARTUUID=...`（不支持 `LABEL=`）；
    - `rootfstype=`（可省略，省略时先让内核自动探测，失败再依次试 ext4/xfs/btrfs/vfat）；
    - `rootflags=` 透传给 mount；
    - `rw`：默认只读挂载，出现 `rw` 才读写；
-4. 设备节点可能还没就绪，所以按 20 次 × 250ms 重试；
-5. 挂载前对根设备执行 `fsck -p`：initramfs 里找得到 `/sbin/fsck`（或 `/bin`、
+6. 设备节点可能还没就绪，所以按 20 次 × 250ms 重试；
+7. 挂载前对根设备执行 `fsck -p`：initramfs 里找得到 `/sbin/fsck`（或 `/bin`、
    `/usr/sbin`、`/usr/bin`）才执行，`fsck=no` 可在内核命令行关闭；退出码 4/8/16/32
    等视为失败，拒绝挂载并进入 rescue（0/1/2 视为可用）；
-6. 挂载到 `/newroot`，读取 `/newroot/etc/fstab`，把根以外的条目（跳过 swap、伪文件
+8. 挂载到 `/newroot`，读取 `/newroot/etc/fstab`，把根以外的条目（跳过 swap、伪文件
    系统、`noauto` 和重复挂载点）挂到 `/newroot/<mountpoint>`；挂载点先规范化（折叠
    重复 `/` 和 `.`、解析 `..`、拒绝越过根），`/data/` 与 `/data` 视为同一条目；`nofail`
    的失败只告警，其余失败中止启动。`bind`/`rbind` 转成对应挂载标志，`_netdev`、`x-*`、`comment=`、
    `users` 等只属于 mount(8) 的选项会被丢弃而不是传给内核；其余选项作为文件系统
    参数透传；
-7. 从 `/newroot/etc/jiminit.toml` 读 `init_path`（stage1 以真实根的配置为准），并校验
+9. 从 `/newroot/etc/jiminit.toml` 读 `init_path`（stage1 以真实根的配置为准），并校验
    该可执行文件存在；
-8. 把 `/dev`、`/proc`、`/sys` 的挂载点 MS_MOVE 进新根；移动失败时若目标已经是挂载点
+10. 把 `/dev`、`/proc`、`/sys` 的挂载点 MS_MOVE 进新根；移动失败时若目标已经是挂载点
    则记 info，否则中止启动；
-9. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
+11. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
    （与 busybox switch_root 相同的收尾，缺 `chroot(".")` 会导致后续 exec 仍看旧根）；
-10. `execve("/sbin/jiminit", ["--stage2"])`。
+12. `execve("/sbin/jiminit", ["--stage2"])`。
 
 ### stage2（PID 1）
 
@@ -191,6 +201,11 @@ shell；只有文件缺失才使用全默认值。rescue shell 自己则用 `loa
 ./scripts/mk-rootfs.sh       # 生成 out/rootfs.ext4
 ./scripts/run-qemu.sh        # 交互式启动（ctrl-a x 退出）
 ./scripts/smoke-test.sh      # 自动验证并输出 PASS/FAIL
+
+# LUKS + LVM 根：先以普通用户构建 rootfs，再用 root 造磁盘
+./scripts/build.sh && ./scripts/mk-rootfs.sh
+qt-sudo ./scripts/mk-luks-image.sh   # out/luks.img + out/crypttab
+./scripts/smoke-luks-test.sh         # 解锁 → 激活 LVM → 登录 → 关机
                              # （mk-initramfs 支持 FSCK_STUB=1、MODPROBE_STUB=1
                              #   注入 stub fsck/modprobe；MODPROBE_STUB_FAIL=1
                              #   让 stub 失败，用于手工验证 rescue 路径）
@@ -229,6 +244,8 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
   `/tmp` → `soft reboot #1: exec /sbin/jiminit --stage2` → 再次以 PID 1 启动、
   服务与 getty 全部重新拉起并出现新的 login 提示；之后再登录并 `kill -TERM 1`
   正常 `Power down`；
+- LUKS2 容器（crypttab `UUID=` + 交互口令）→ `lvm vgchange -ay` →
+  `root=/dev/mapper/jiminitvg-root` → 登录 → 关机，冒烟测试全过；
 - `root=UUID=<fs-uuid>`、`root=PARTUUID=<gpt-partition-guid>` 均能定位设备
   （GPT 分区测试得到 `/dev/vda1`）。
 
@@ -245,8 +262,13 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
   由内核拒绝并中止启动），没有实现 util-linux 的完整选项表；
 - `PARTUUID=` 的 MBR 分支只支持主分区（`diskid-01`…`-04`），不支持扩展/逻辑分区；
   GPT 只扫描前 128 个表项；GPT 的逻辑扇区大小会自动探测，4Kn 磁盘可用；
-- 不支持 LUKS/LVM（没有 cryptsetup/dm 初始化），也还没处理 `/usr` 单独挂载后
-  切根前的 pivot 场景；
+- LUKS 只支持 plain LUKS1/LUKS2 的 `luks` 类型（没有 tcrypt/bitlk），不支持
+  detached header 以外的密钥来源组合；口令/密钥文件之外没有 keyring、TPM 等；
+  测试镜像用 pbkdf2/2000 轮是为了在 TCG 下快，Argon2 的默认参数在无 KVM 时会很慢；
+- LVM 只做整个卷组的 `vgchange -ay`：不处理 thin/raid/cache 的特殊激活，也不读
+  宿主的 lvm.conf（initramfs 里用一份精简配置，关掉 udev 同步）；
+- initramfs 打包 cryptsetup/lvm/modprobe 时按 `ldd` 收库，镜像会涨到约 11MB；
+- 也还没处理 `/usr` 单独挂载后切根前的 pivot 场景；
 - jiminit 不内置认证：没有 PAM，也不解析 `/etc/shadow`，完全依赖外部 `login`
   （测试镜像里是 busybox）；替换成 util-linux login/agetty 时应同样可用；
 - 运行级只有三个固定级别，没有 SysV 的任意 rcN.d 脚本目录，也没有 inittab；
@@ -267,7 +289,9 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 依赖只引入 `nix` + `serde`/`toml` + `anyhow`，其余（cmdline、UUID/GPT 解析、fstab、
 fsck 调用与退出码判定、switch_root、signalfd 主循环、服务监督）都自己实现，便于后续
 替换或精简。模块加载没有自己实现 modprobe，而是解析规则后调用外部 modprobe，
-这样 `.ko` 的解压、依赖和 version magic 都交给内核工具链。
+这样 `.ko` 的解压、依赖和 version magic 都交给内核工具链。同理，LUKS 与 LVM
+不自己实现 dm-crypt/元数据，只调用外部 `cryptsetup`/`lvm`：initramfs 打包时用
+`ldd` 自动收集动态依赖，避免了把 JSON/LVM 元数据格式重新实现一遍。
 PID 1 主循环用 `signalfd` + `poll` 而不是线程，避免在多线程进程里 fork 的风险；
 服务日志通过管道回到主循环带前缀写入 kmsg，同样不需要额外线程。
 

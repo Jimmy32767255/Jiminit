@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# mkinitcpio build script: install jiminit and its helpers into the initramfs.
+#
+# Install to /usr/lib/initcpio/install/jiminit, add `jiminit` as the LAST hook
+# in /etc/mkinitcpio.conf, and remove the stock `fsck` hook (jiminit runs fsck
+# itself, see README). The kernel command line still needs root=...
+
+build() {
+    add_binary /sbin/jiminit
+
+    # Optional helpers are only added when they are installed on the host.
+    for tool in modprobe fsck.ext4 cryptsetup lvm; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            add_binary "$(command -v "$tool")"
+        fi
+    done
+
+    if [[ -f /etc/jiminit.toml ]]; then
+        add_file /etc/jiminit.toml
+    fi
+    if [[ -f /etc/crypttab ]]; then
+        add_file /etc/crypttab
+    fi
+    if [[ -f /etc/lvm/lvm.conf ]]; then
+        add_file /etc/lvm/lvm.conf
+    fi
+
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+This hook hands control to jiminit (stage 1) at the end of the initramfs:
+it mounts the real root, runs fsck/optional LUKS unlock and LVM activation,
+then pivot_roots into it and re-executes jiminit as PID 1.
+
+Keep it last in HOOKS. Remove the `fsck` hook to avoid running fsck twice.
+HELPEOF
+}

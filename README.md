@@ -28,9 +28,10 @@ src/
   config.rs   /etc/jiminit.toml 配置
   cmdline.rs  /proc/cmdline 解析
   mount.rs    挂载辅助
-  log.rs      同时写 stderr 和 /dev/kmsg 的日志
+  log.rs      同时写 stderr、/dev/kmsg 和可选日志文件（1 MiB 滚动）
 scripts/
-  build.sh         静态 release 构建
+  build.sh         静态 release 构建（TARGET= 可交叉构建）
+  install.sh       安装到 /sbin、/etc（支持 --prefix/--destdir）
   mk-initramfs.sh  生成 initramfs（/init + busybox）
   mk-rootfs.sh     生成 ext4 根镜像（jiminit + busybox + 配置 + 示例服务）
   run-qemu.sh      交互式启动测试
@@ -38,6 +39,11 @@ scripts/
   mk-usr-image.sh  /usr 独立分区的镜像
   smoke-usr-test.sh /usr 独立分区 + pivot_root 测试
   smoke-real-test.sh coldplug + 真实 e2fsck 测试
+contrib/
+  jiminit.toml         配置模板（install.sh 用它初始化 /etc/jiminit.toml）
+  mkinitcpio/install/  mkinitcpio 构建脚本
+  mkinitcpio/hooks/    mkinitcpio 运行时 hook（exec /sbin/jiminit --stage1）
+PKGBUILD               Arch/Artix 包（从当前 checkout 构建）
   mk-luks-image.sh LUKS + LVM 根镜像（需要 root）
   smoke-luks-test.sh LUKS/LVM 自动冒烟测试
 ```
@@ -370,6 +376,62 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - 配置解析失败（未知键/类型错误）会进入 rescue 而不是带默认值继续启动；
 - 软重启用 tmpfs 顶替 `/run`、`/tmp`，旧内容若原本在根文件系统上仍会占用空间
   （真重启才会回收）。
+
+## 安装到真实系统
+
+本地安装（先 `./scripts/build.sh`）：
+
+```sh
+./scripts/install.sh                      # /sbin/jiminit + /etc/jiminit.toml
+./scripts/install.sh --prefix /usr        # 装到 /usr/sbin（配置仍在 /etc）
+./scripts/install.sh --destdir out/stage  # 打包用（DESTDIR）
+```
+
+已有的 `/etc/jiminit.toml` 不会被覆盖；`/etc/jiminit/services.d/` 里会放一个
+`example.toml.disabled` 示例。安装后按需编辑配置与服务。若机器不需要 initramfs
+（根设备驱动已内建、没有 LUKS/LVM），内核命令行写 `init=/sbin/jiminit` 即可直接引导。
+
+Arch/Artix 也可以直接打包（PKGBUILD 会构建当前 checkout）：
+
+```sh
+makepkg -si
+```
+
+### mkinitcpio 集成
+
+把 hook 装到 mkinitcpio 的目录（PKGBUILD 会自动做）：
+
+```sh
+install -Dm755 contrib/mkinitcpio/install/jiminit /usr/lib/initcpio/install/jiminit
+install -Dm755 contrib/mkinitcpio/hooks/jiminit   /usr/lib/initcpio/hooks/jiminit
+```
+
+在 `/etc/mkinitcpio.conf` 里把 `jiminit` 放在 **最后**，并移除 `fsck`（jiminit 自己
+会跑 `fsck -p`）：
+
+```
+HOOKS=(base udev autodetect modconf block filesystems keyboard jiminit)
+```
+
+然后 `mkinitcpio -P`。hook 会把 `/sbin/jiminit`、`modprobe`、可选的
+`fsck.ext4`/`cryptsetup`/`lvm`，以及主机上的 `/etc/crypttab`、`/etc/lvm/lvm.conf`
+打进 initramfs；内核命令行仍然要写 `root=`/`rootfstype=`。注意 `/etc/crypttab` 里
+的所有条目都会被解锁（目前没有按 root 过滤）。
+
+### aarch64 / 交叉构建
+
+代码没有 x86_64 特有假设（磁盘扇区大小、ioctl、设备号都走 libc/sysfs 或运行时
+探测）；但目前只在 x86_64 上实测过。
+
+```sh
+rustup target add aarch64-unknown-linux-gnu
+# 需要交叉 linker，例如 aarch64-linux-gnu-gcc，并在 .cargo/config.toml 里配置
+TARGET=aarch64-unknown-linux-gnu ./scripts/build.sh
+ARCH=aarch64 KERNEL=/boot/Image ./scripts/run-qemu.sh   # 需要 aarch64 内核与 qemu-system-aarch64
+```
+
+静态 glibc 在非 x86_64 上可能需要内核支持 static PIE；遇到问题时可以改用
+`aarch64-unknown-linux-musl` 目标（musl 静态链接更省心，但这一路径尚未验证）。
 
 ## 设计取舍
 

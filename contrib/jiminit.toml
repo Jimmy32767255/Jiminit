@@ -1,0 +1,19 @@
+# jiminit configuration. Every key is optional; this file documents the
+# defaults. See README.md for the full reference.
+
+hostname = "jiminit"
+console = "/dev/console"
+shell = "/bin/sh"
+respawn = true
+shutdown_timeout_ms = 3000
+cgroup = true
+log_file = "/var/log/jiminit.log"
+ready_timeout_ms = 5000
+default_runlevel = "multi-user"
+services_dir = "/etc/jiminit/services.d"
+init_path = "/sbin/jiminit"
+
+# getty/logins: authentication is delegated to the getty/login programs.
+getty = "/sbin/getty"
+ttys = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
+serial_ttys = ["/dev/ttyS0"]

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runtime hook: replace the initramfs shell with jiminit stage 1, which takes
+# over root mounting and the switch_root/pivot_root hand-off.
+run_hook() {
+    exec /sbin/jiminit --stage1
+}

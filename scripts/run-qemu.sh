@@ -11,7 +11,25 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-KERNEL=${KERNEL:-/boot/vmlinuz-linux}
+ARCH=${ARCH:-$(uname -m)}
+case "$ARCH" in
+    x86_64)
+        QEMU=qemu-system-x86_64
+        MACHINE=
+        APPEND="console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw"
+        KERNEL=${KERNEL:-/boot/vmlinuz-linux}
+        ;;
+    aarch64|arm64)
+        QEMU=qemu-system-aarch64
+        MACHINE="-M virt -cpu cortex-a57"
+        APPEND="console=ttyAMA0 rdinit=/init root=/dev/vda rootfstype=ext4 rw"
+        KERNEL=${KERNEL:-/boot/Image}
+        ;;
+    *)
+        echo "unsupported ARCH=$ARCH (use x86_64 or aarch64)" >&2
+        exit 1
+        ;;
+esac
 if [ ! -f "$KERNEL" ]; then
     echo "no kernel at $KERNEL (set KERNEL=...)" >&2
     exit 1
@@ -23,10 +41,10 @@ for f in out/initramfs.cpio.gz out/rootfs.ext4; do
     fi
 done
 
-exec qemu-system-x86_64 \
-    -m 512M -smp 2 \
+exec "$QEMU" \
+    -m 512M -smp 2 $MACHINE \
     -kernel "$KERNEL" \
     -initrd out/initramfs.cpio.gz \
     -drive file=out/rootfs.ext4,format=raw,if=virtio \
-    -append "console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw" \
+    -append "$APPEND" \
     -nographic -no-reboot "$@"

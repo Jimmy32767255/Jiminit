@@ -46,7 +46,11 @@ pub fn run() -> Result<()> {
 
     let cfg = crate::config::load(Path::new(crate::config::DEFAULT_PATH))
         .context("load configuration")?;
+    crate::log::init_file(&cfg.log_file);
     crate::info!("stage2: starting as pid {}", nix::unistd::getpid());
+    if !cfg.log_file.is_empty() {
+        crate::info!("logging to {}", cfg.log_file);
+    }
     if let Ok(n) = std::env::var("JIMINIT_SOFT_REBOOTS") {
         crate::info!("soft reboot #{n}: running stage2 again");
     }
@@ -224,6 +228,7 @@ fn parse_default_level(cfg: &Config) -> Level {
 /// the machine is still usable and PID 1 never exits.
 pub fn rescue() -> ! {
     let cfg = crate::config::load_or_default(Path::new(crate::config::DEFAULT_PATH));
+    crate::log::init_file(&cfg.log_file);
     let shell = if Path::new(&cfg.shell).exists() {
         cfg.shell.clone()
     } else {
@@ -609,7 +614,12 @@ fn handle_client(
     let command = request.trim();
 
     let (reply, action) = if command == "status" {
-        (format!("status {}\n", level.name()), None)
+        let mut reply = format!("status {}\n", level.name());
+        for line in supervisor.status_lines() {
+            reply.push_str(&line);
+            reply.push('\n');
+        }
+        (reply, None)
     } else if let Some(name) = command.strip_prefix("runlevel ") {
         runlevel_request(cfg, name.trim(), level, supervisor, getties, single_shell)
     } else if let Some(rest) = command.strip_prefix("service ") {

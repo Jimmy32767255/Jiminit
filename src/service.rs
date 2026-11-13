@@ -391,6 +391,8 @@ struct LogPipe {
 }
 
 pub struct Supervisor {
+    /// How often each service has been started (first start included).
+    starts: Vec<u32>,
     services: Vec<ServiceSpec>,
     running: HashMap<Pid, Running>,
     pending: Vec<PendingRestart>,
@@ -464,6 +466,7 @@ impl Supervisor {
         );
 
         Self {
+            starts: vec![0; services.len()],
             services,
             running: HashMap::new(),
             pending: Vec::new(),
@@ -575,6 +578,33 @@ impl Supervisor {
     /// SIGKILL the given service process groups.
     /// Start due restarts and services whose dependencies became ready.
     /// Called from the main loop on every wakeup.
+    /// One human-readable line per service for `jiminit --status`.
+    pub fn status_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (idx, spec) in self.services.iter().enumerate() {
+            let running = self.running.iter().find(|(_, run)| run.idx == idx);
+            let restarts = self.starts[idx].saturating_sub(1);
+            let line = match running {
+                Some((pid, run)) => {
+                    let memory = crate::cgroup::memory_current(&spec.name);
+                    format!(
+                        "{} running pid={} restarts={restarts} ready={} memory={}",
+                        spec.name,
+                        pid.as_raw(),
+                        if run.ready { "yes" } else { "no" },
+                        human_bytes(memory)
+                    )
+                }
+                None => format!(
+                    "{} stopped pid=- restarts={restarts} ready=- memory=-",
+                    spec.name
+                ),
+            };
+            lines.push(line);
+        }
+        lines
+    }
+
     pub fn tick(&mut self) {
         if self.stopping {
             return;
@@ -843,6 +873,7 @@ impl Supervisor {
         let (read_fd, write_fd) = pipe_cloexec().context("pipe")?;
         set_nonblocking(&read_fd);
 
+        self.starts[idx] += 1;
         match unsafe { fork() }.context("fork")? {
             ForkResult::Parent { child } => {
                 drop(write_fd);
@@ -1193,6 +1224,20 @@ fn clear_signal_mask() {
     let _ = sigprocmask(SigmaskHow::SIG_SETMASK, Some(&empty), None);
 }
 
+/// Compact byte count for status lines: `0` when unknown.
+fn human_bytes(bytes: u64) -> String {
+    if bytes == 0 {
+        return "-".to_string();
+    }
+    if bytes < 1024 {
+        return format!("{bytes}B");
+    }
+    if bytes < 1024 * 1024 {
+        return format!("{:.1}K", bytes as f64 / 1024.0);
+    }
+    format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+}
+
 fn child_fail(spec: &ServiceSpec, message: &str) -> ! {
     let line = format!("cannot start service: {message}\n");
     let prefix = format!("svc/{}: ", spec.name);
@@ -1259,6 +1304,14 @@ mod tests {
             notify: false,
             limits: Limits::default(),
         }
+    }
+
+    #[test]
+    fn formats_byte_counts() {
+        assert_eq!(human_bytes(0), "-");
+        assert_eq!(human_bytes(512), "512B");
+        assert_eq!(human_bytes(1536), "1.5K");
+        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0M");
     }
 
     #[test]

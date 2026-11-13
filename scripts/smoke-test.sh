@@ -87,6 +87,10 @@ qpid=$!
 login 1
 printf 'jiminit --status\n' >"$FIFO"
 wait_for 'status multi-user' 20
+wait_for 'ticker running pid=' 20
+wait_for 'cg running pid=.* memory=[0-9]' 20
+printf 'test -s /var/log/jiminit.log && echo LOGFILE-OK\n' >"$FIFO"
+wait_for 'LOGFILE-OK' 20
 printf 'id\n' >"$FIFO"
 wait_for 'uid=0(root)' 20
 printf 'ls -l /run/jiminit.sock\n' >"$FIFO"

@@ -143,12 +143,25 @@ jiminit 只负责拉起 getty 和处理运行级，用户名/密码校验完全�
 运行中的 init 可通过控制 socket 查询和切换（`/run/jiminit.sock`）：
 
 ```sh
-jiminit --status                # 输出 status multi-user
+jiminit --status                # 运行级 + 每个服务一行状态
 jiminit --runlevel single       # 切到单用户，原登录会话会被结束
 jiminit --runlevel 3            # 数字别名
 jiminit --runlevel reboot       # 6 / reboot 触发重启；0 / poweroff / halt 触发关机
 jiminit --service network restart   # start | stop | restart | reload（reload 发 SIGHUP）
 ```
+
+`--status` 的首行仍是 `status <level>`，之后每个服务一行：
+
+```
+status multi-user
+cg running pid=118 restarts=0 ready=yes memory=1.2M
+after stopped pid=- restarts=1 ready=- memory=-
+```
+
+字段依次是：服务名、状态（`running`/`stopped`，未运行或已退出都算 stopped）、pid、
+自 stage2 启动以来的启动次数减一（软重启会重置）、是否就绪（`notify` 服务在收到
+`READY=1` 前为 no，非 notify 服务启动即 yes）、`memory.current`（未启用 memory
+控制器时为 `-`）。
 
 ## 服务（`/etc/jiminit/services.d`）
 
@@ -213,6 +226,7 @@ shell    = "/bin/sh"
 respawn  = true                    # single 级 root shell 退出后是否重新拉起
 shutdown_timeout_ms = 3000         # 关机时等待 SIGTERM 的时长
 cgroup = true                      # 每个服务放进独立 cgroup v2 子组
+log_file = "/var/log/jiminit.log"  # 追加日志；设为 "" 关闭；超过 1 MiB 滚动为 .1
 ready_timeout_ms = 5000            # notify 服务等 READY=1 的上限
 init_path = "/sbin/jiminit"        # stage2 可执行文件路径
 services_dir = "/etc/jiminit/services.d"
@@ -288,7 +302,10 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
   `16`，对应控制器日志 `cgroup: enabled controller memory/pids`（按需启用）；
 - `hog` 服务（`memory_max = "4M"`）分配超限后被内核杀掉，日志出现
   `svc/hog: OOM-killed (… total)`，`restart = "never"` 时不再拉起；
-- `jiminit --status` 返回 `status multi-user`；
+- `jiminit --status` 返回 `status multi-user`，并列出每个服务的 pid/重启次数/就绪/
+  内存占用（`ticker running pid=…`、`cg running pid=… memory=…`）；
+- 日志同时追加到 `/var/log/jiminit.log`（`test -s` 验证非空），超过 1 MiB 时滚动
+  为 `.1`；
 - 控制 socket 权限为 `0600`，非 root 用户无法查询或切换运行级；
 - `jiminit --runlevel single` → 停 getty/ticker → `now in runlevel single`，
   console 上出现单用户 root shell；`jiminit --runlevel multi-user` → 重新起 getty，
@@ -341,6 +358,10 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
   也没有全局默认限制；
 - OOM 靠主循环轮询 `memory.events` 发现（不是事件驱动）；cgroup 目录回收后计数
   归零，只用于日志提示，重启决策仍由退出状态和 restart 策略决定；
+- 日志文件只保留一份旧的 `.1`，不压缩、不外发 syslog；文件写失败会静默停用该
+  sink（kmsg/console 仍在）；
+- `--status` 只报内存，不报 CPU/IO 用量；`restarts` 从 stage2 本次启动算起，
+  服务被手动 stop/start 也会计入；
 - 只支持 x86_64 上验证过的路径，其他架构未测试；
 - `root=` 只支持 `/dev` 路径、UUID、PARTUUID，不支持 LABEL；
 - 软重启只重新执行 stage2：initramfs 已经不在，内核也不会重新引导，所以

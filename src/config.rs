@@ -23,6 +23,8 @@ pub struct Config {
     pub shutdown_timeout_ms: u64,
     /// Path of the stage 2 binary inside the real root filesystem.
     pub init_path: String,
+    /// Append init logs here (empty disables the file sink).
+    pub log_file: String,
     /// Directory with `*.toml` service definitions.
     pub services_dir: String,
     /// Put each service into its own cgroup v2 subtree.
@@ -53,6 +55,7 @@ impl Default for Config {
             respawn: true,
             shutdown_timeout_ms: 3000,
             init_path: "/sbin/jiminit".to_string(),
+            log_file: "/var/log/jiminit.log".to_string(),
             services_dir: crate::service::DEFAULT_DIR.to_string(),
             cgroup: true,
             ready_timeout_ms: 5_000,

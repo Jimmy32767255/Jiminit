@@ -159,6 +159,17 @@ fn write_limit(dir: &Path, file: &str, value: &str) {
     }
 }
 
+/// Current memory usage of the service cgroup in bytes (0 when unavailable).
+pub fn memory_current(name: &str) -> u64 {
+    let Some(dir) = service_dir(name) else {
+        return 0;
+    };
+    std::fs::read_to_string(dir.join("memory.current"))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// Number of OOM kills recorded for this service cgroup.
 pub fn oom_kill_count(name: &str) -> u64 {
     let Some(dir) = service_dir(name) else {

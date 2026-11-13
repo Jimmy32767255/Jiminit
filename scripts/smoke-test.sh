@@ -36,6 +36,11 @@ wait_for() {
     done
 }
 
+line_of() {
+    # First line number containing $1 (0 when absent).
+    grep -n -m1 "$1" "$LOG" 2>/dev/null | cut -d: -f1 || true
+}
+
 wait_count() {
     pattern=$1
     want=$2
@@ -101,14 +106,26 @@ printf 'jiminit --runlevel multi-user &\n' >"$FIFO"
 wait_for 'now in runlevel multi-user' 20
 wait_count 'login:' 2 30
 
-# 4. Log in again and soft reboot: every session is stopped, stage 2 re-execs
-#    and getty comes back.
+# 4. Log in again and exercise per-service control over the socket.
 login 2
+printf 'jiminit --service after stop\n' >"$FIFO"
+wait_for 'ok after stopping' 15
+wait_for 'svc/after: stopping on request' 15
+printf 'jiminit --service after start\n' >"$FIFO"
+wait_for 'ok after started' 15
+printf 'jiminit --service after restart\n' >"$FIFO"
+wait_for 'ok after restarting' 15
+wait_count 'svc/after: started' 2 20
+printf 'jiminit --service notifier reload\n' >"$FIFO"
+wait_for 'ok notifier reloaded' 15
+
+# 5. Soft reboot: every session is stopped, stage 2 re-execs and getty comes
+#    back.
 printf 'kill -USR1 1\n' >"$FIFO"
 wait_count 'running stage2 again' 1 30
 wait_count 'login:' 3 40
 
-# 5. Log in on the new stage 2 and power off.
+# 6. Log in on the new stage 2 and power off.
 login 3
 printf 'kill -TERM 1\n' >"$FIFO"
 
@@ -155,6 +172,14 @@ grep -q 'soft reboot #1: exec' "$LOG" || fail "stage 2 was not re-executed"
 grep -q 'soft reboot: fresh tmpfs on /run' "$LOG" || fail "/run was not reset"
 grep -q 'soft reboot: fresh tmpfs on /tmp' "$LOG" || fail "/tmp was not reset"
 [ "$(count 'svc/ticker: started')" -ge 2 ] || fail "services did not restart after a runlevel switch/soft reboot"
+grep -q 'svc/cg: 0::/jiminit/cg' "$LOG" || fail "service was not placed in its cgroup"
+[ "$(count 'svc/user: 65534')" -ge 2 ] || fail "service did not drop privileges to nobody"
+grep -q 'svc/notifier: waiting for READY=1' "$LOG" || fail "notify service did not get NOTIFY_SOCKET"
+grep -q 'svc/notifier: ready' "$LOG" || fail "notify service never reported READY=1"
+ready_line=$(line_of 'svc/notifier: ready')
+after_line=$(line_of 'svc/after: started')
+[ -n "$ready_line" ] && [ -n "$after_line" ] && [ "$ready_line" -lt "$after_line" ] ||
+    fail "dependent service started before its dependency was ready"
 [ "$(count 'login:')" -ge 3 ] || fail "getty did not come back after the soft reboot"
 grep -q 'reboot: Power down' "$LOG" || fail "poweroff was not requested"
 

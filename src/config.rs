@@ -25,6 +25,10 @@ pub struct Config {
     pub init_path: String,
     /// Directory with `*.toml` service definitions.
     pub services_dir: String,
+    /// Put each service into its own cgroup v2 subtree.
+    pub cgroup: bool,
+    /// How long a `notify = true` service may take to send READY=1.
+    pub ready_timeout_ms: u64,
     /// Runlevel entered at boot: `single`, `multi-user` or `graphical`
     /// (numeric aliases `1`/`3`/`5` are accepted too).
     pub default_runlevel: String,
@@ -50,6 +54,8 @@ impl Default for Config {
             shutdown_timeout_ms: 3000,
             init_path: "/sbin/jiminit".to_string(),
             services_dir: crate::service::DEFAULT_DIR.to_string(),
+            cgroup: true,
+            ready_timeout_ms: 5_000,
             default_runlevel: "multi-user".to_string(),
             getty: "/sbin/getty".to_string(),
             getty_baud: "38400".to_string(),

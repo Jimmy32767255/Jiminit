@@ -16,7 +16,9 @@ src/
   stage1.rs   initramfs 阶段：解析 root=、挂载真实根、switch_root
   stage2.rs   真实根阶段：PID 1 主循环（服务、getty/login、收尸、信号、关机）
   runlevel.rs single / multi-user / graphical 运行级与数字别名
-  service.rs  服务监督：TOML 解析、依赖拓扑、重启退避、日志转发、停机
+  service.rs  服务监督：TOML 解析、依赖拓扑、重启退避、日志转发、就绪探测、停机
+  accounts.rs /etc/passwd、/etc/group 解析（服务降权，无 NSS）
+  cgroup.rs   为每个服务建 cgroup v2 子组
   rootdev.rs  根设备解析：/dev 路径、UUID=、PARTUUID=
   modules.rs  /etc/modules + modprobe.d 规则，加载根设备所需的内核模块
   coldplug.rs 扫描 /sys 的 modalias，用 modprobe 自动加载已发现设备的驱动
@@ -145,6 +147,7 @@ jiminit --status                # 输出 status multi-user
 jiminit --runlevel single       # 切到单用户，原登录会话会被结束
 jiminit --runlevel 3            # 数字别名
 jiminit --runlevel reboot       # 6 / reboot 触发重启；0 / poweroff / halt 触发关机
+jiminit --service network restart   # start | stop | restart | reload（reload 发 SIGHUP）
 ```
 
 ## 服务（`/etc/jiminit/services.d`）
@@ -162,14 +165,29 @@ oneshot = false             # true 表示跑完就结束、不重启
 working_dir = "/"           # 工作目录，默认 /
 env = { FOO = "bar" }       # 额外环境变量
 runlevels = ["multi-user"]  # 默认 ["multi-user", "graphical"]
+user = "nobody"             # 以该用户运行（名字或数字 uid），默认 root
+group = "nogroup"           # 覆盖主组（名字或数字 gid）
+supplementary_groups = []   # 附加组；留空则用 /etc/group 里该用户的组
+notify = false              # true 时等待服务在 NOTIFY_SOCKET 上发 READY=1
 ```
 
 启动语义：
 
-- 按 `depends_on` 建依赖图，无依赖关系的服务并行拉起（启动完成 = fork+exec 成功，
-  没有就绪探测协议）；依赖缺失或成环的服务会被跳过并告警；
+- 按 `depends_on` 建依赖图，无依赖关系的服务并行拉起；依赖缺失或成环的服务会被
+  跳过并告警；
+- 默认 fork+exec 成功即视为就绪。`notify = true` 的服务会从环境里拿到
+  `NOTIFY_SOCKET`（`/run/jiminit/notify/<name>.sock`，权限 0666），发出 `READY=1`
+  后其依赖才会启动；超过 `ready_timeout_ms` 仍没收到则告警并按就绪继续，避免死等；
+  `STATUS=...` 会转发到日志。`jiminit --notify-send "$NOTIFY_SOCKET" READY=1`
+  可用于脚本；
 - 服务在独立 session/进程组中运行，stdin 是 `/dev/null`，stdout/stderr 经管道转发到
   `/dev/kmsg`，每行带 `svc/<name>: ` 前缀；
+- 默认每个服务被放进 `/sys/fs/cgroup/jiminit/<name>`（cgroup v2 统一层级），关机超时
+  时用 `cgroup.kill` 连逃出进程组的孙进程一起杀；
+- `user`/`group` 只用 `/etc/passwd`、`/etc/group` 解析（不查 NSS），先
+  `setgroups` 再 `setgid` 再 `setuid`，HOME/USER/LOGNAME 同步设置；
+- 控制 socket 支持 `service <name> start|stop|restart|reload`；手动 stop 不会被重启
+  策略覆盖，restart 等旧进程退出后再拉起；
 - 退出后按策略重启：连续失败从 1s 开始指数退避（2s、4s…上限 60s），连续 5 次失败后
   放弃并告警；连续运行满 10s 会重置失败计数；
 - 只有当前运行级（以及依赖它的服务所在级）的成员才会被启动，见上一节；
@@ -185,6 +203,8 @@ console  = "/dev/console"
 shell    = "/bin/sh"
 respawn  = true                    # single 级 root shell 退出后是否重新拉起
 shutdown_timeout_ms = 3000         # 关机时等待 SIGTERM 的时长
+cgroup = true                      # 每个服务放进独立 cgroup v2 子组
+ready_timeout_ms = 5000            # notify 服务等 READY=1 的上限
 init_path = "/sbin/jiminit"        # stage2 可执行文件路径
 services_dir = "/etc/jiminit/services.d"
 default_runlevel = "multi-user"    # single | multi-user | graphical（或 1/3/5）
@@ -239,7 +259,7 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 
 ### 已验证
 
-- initramfs → 挂载 `/dev/vda` → MS_MOVE 切换根 → stage2 以 PID 1 运行；
+- initramfs → 挂载 `/dev/vda` → `pivot_root` 切换根 → stage2 以 PID 1 运行；
 - 读取 `/etc/jiminit.toml`（hostname 生效）、`/proc/1/comm` 为 `jiminit`；
 - 串口 console 上出现 `jiminit-qemu login:`，用 root/`jiminit` 经 busybox `login`
   登录后得到 root shell（`id` 显示 `uid=0(root)`）；默认还在 tty1–tty6 起了 getty；
@@ -249,6 +269,12 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
   并按 `/etc/fstab` 挂载了 `tmpfs /data`；
 - 服务：`ticker` 每秒输出并被转发到 kmsg（`svc/ticker: tick`）；
   `failer` 退出码 1 后按 1s→2s→4s 退避重启；关机时 `ticker` 收到 SIGTERM 退出；
+- 服务在 `/sys/fs/cgroup/jiminit/<name>` 中运行（`/proc/self/cgroup` 显示
+  `0::/jiminit/cg`）；`user = "nobody"` 的服务日志显示 uid/gid 65534；
+- `notify = true` 的 `notifier` 发 `READY=1` 后 `svc/notifier: ready` 才出现，
+  依赖它的 `after` 在之后才 `started`；超时路径有单测/告警；
+- `jiminit --service after stop|start|restart` 分别输出 `ok after stopping/started/
+  restarting`，停止后不会被重启策略拉起；`--service notifier reload` 发 SIGHUP；
 - `jiminit --status` 返回 `status multi-user`；
 - 控制 socket 权限为 `0600`，非 root 用户无法查询或切换运行级；
 - `jiminit --runlevel single` → 停 getty/ticker → `now in runlevel single`，

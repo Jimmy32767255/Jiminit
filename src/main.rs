@@ -10,6 +10,8 @@
 //!
 //! PID 1 must never exit, so every failure ends up in a rescue shell loop.
 
+mod accounts;
+mod cgroup;
 mod cmdline;
 mod coldplug;
 mod config;
@@ -27,7 +29,7 @@ mod stage2;
 
 use std::ffi::CString;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,8 @@ fn client() -> Option<i32> {
     {
         ["--status"] => "status".to_string(),
         ["--runlevel", level] => format!("runlevel {level}"),
+        ["--service", name, action] => format!("service {name} {action}"),
+        ["--notify-send", path, message] => return Some(notify_send(path, message)),
         _ => return None,
     };
     Some(run_client(&request))
@@ -107,6 +111,24 @@ fn run_client(request: &str) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Send one sd_notify datagram, e.g. `jiminit --notify-send "$NOTIFY_SOCKET" READY=1`.
+fn notify_send(path: &str, message: &str) -> i32 {
+    let socket = match UnixDatagram::unbound() {
+        Ok(socket) => socket,
+        Err(e) => {
+            eprintln!("jiminit: cannot create datagram socket: {e}");
+            return 1;
+        }
+    };
+    match socket.send_to(message.as_bytes(), path) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("jiminit: cannot send to {path}: {e}");
+            1
+        }
     }
 }
 

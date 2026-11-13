@@ -60,7 +60,9 @@ pub fn run() -> Result<()> {
             .context("signalfd")?;
     let listener = control_listener();
 
+    crate::cgroup::init(cfg.cgroup);
     let mut supervisor = Supervisor::new(Path::new(&cfg.services_dir), level);
+    supervisor.set_ready_timeout(Duration::from_millis(cfg.ready_timeout_ms));
     supervisor.start_members();
 
     let mut getties: Vec<Getty> = Vec::new();
@@ -75,7 +77,7 @@ pub fn run() -> Result<()> {
         // Wake on a signal, on service output, on a control request, or after
         // the timeout.
         {
-            let mut pollfds = Vec::with_capacity(2 + supervisor.log_count());
+            let mut pollfds = Vec::with_capacity(3 + supervisor.log_count());
             pollfds.push(PollFd::new(signal_fd.as_fd(), PollFlags::POLLIN));
             if let Some(listener) = &listener {
                 pollfds.push(PollFd::new(listener.as_fd(), PollFlags::POLLIN));
@@ -83,9 +85,13 @@ pub fn run() -> Result<()> {
             for fd in supervisor.log_fds() {
                 pollfds.push(PollFd::new(fd, PollFlags::POLLIN));
             }
+            for fd in supervisor.notify_fds() {
+                pollfds.push(PollFd::new(fd, PollFlags::POLLIN));
+            }
             let _ = poll(&mut pollfds, LOOP_TIMEOUT_MS);
         }
         supervisor.drain_logs();
+        supervisor.drain_notify();
 
         while let Some(info) = signal_fd.read_signal().context("read signalfd")? {
             match info.ssi_signo as i32 {
@@ -606,9 +612,22 @@ fn handle_client(
         (format!("status {}\n", level.name()), None)
     } else if let Some(name) = command.strip_prefix("runlevel ") {
         runlevel_request(cfg, name.trim(), level, supervisor, getties, single_shell)
+    } else if let Some(rest) = command.strip_prefix("service ") {
+        let mut parts = rest.splitn(2, ' ');
+        match (parts.next(), parts.next()) {
+            (Some(name), Some(action)) => match supervisor.control(name, action.trim()) {
+                Ok(message) => (format!("{message}\n"), None),
+                Err(e) => (format!("error {e:#}\n"), None),
+            },
+            _ => (
+                "error usage: service <name> <start|stop|restart|reload>\n".to_string(),
+                None,
+            ),
+        }
     } else {
         (
-            "error unknown request (try `status` or `runlevel <name>`)\n".to_string(),
+            "error unknown request (try `status`, `runlevel <name>` or `service <name> <action>`)\n"
+                .to_string(),
             None,
         )
     };

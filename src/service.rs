@@ -12,10 +12,12 @@ use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::WaitStatus;
 use nix::unistd::{fork, ForkResult, Pid};
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::CString;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -51,6 +53,14 @@ pub struct ServiceSpec {
     /// Runlevels in which this service should run. Empty in the file means
     /// `multi-user` + `graphical`.
     pub runlevels: Vec<Level>,
+    /// Run as this user (name or numeric uid). `None` keeps root.
+    pub user: Option<String>,
+    /// Override the primary group (name or numeric gid).
+    pub group: Option<String>,
+    /// Supplementary groups; empty means "groups the user belongs to".
+    pub supplementary_groups: Vec<String>,
+    /// Wait for `READY=1` on the sd_notify socket before starting dependents.
+    pub notify: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -64,6 +74,11 @@ struct ServiceFile {
     working_dir: Option<String>,
     env: BTreeMap<String, String>,
     runlevels: Vec<String>,
+    user: Option<String>,
+    group: Option<String>,
+    supplementary_groups: Vec<String>,
+    #[serde(default)]
+    notify: bool,
 }
 
 fn default_runlevels() -> Vec<Level> {
@@ -122,6 +137,10 @@ pub fn parse_service(name: &str, text: &str) -> Result<ServiceSpec> {
         working_dir: file.working_dir,
         env: file.env,
         runlevels: parse_runlevels(name, &file.runlevels)?,
+        user: file.user,
+        group: file.group,
+        supplementary_groups: file.supplementary_groups,
+        notify: file.notify,
     })
 }
 
@@ -278,6 +297,15 @@ struct Running {
     idx: usize,
     started: Instant,
     failures: u32,
+    /// False until the service sends READY=1 (notify services only).
+    ready: bool,
+    /// When we stop waiting for READY=1 and treat the service as ready.
+    ready_deadline: Option<Instant>,
+}
+
+struct NotifyPipe {
+    fd: UnixDatagram,
+    name: String,
 }
 
 struct PendingRestart {
@@ -296,7 +324,16 @@ pub struct Supervisor {
     services: Vec<ServiceSpec>,
     running: HashMap<Pid, Running>,
     pending: Vec<PendingRestart>,
+    /// Members that have not been spawned yet, in startup order. A service is
+    /// only spawned once all of its dependencies are ready.
+    pending_start: Vec<usize>,
     logs: Vec<LogPipe>,
+    notify: Vec<NotifyPipe>,
+    /// Services stopped on request; their exit must not trigger a restart.
+    manual_stop: HashSet<usize>,
+    /// Services that should start again once their stop completes.
+    restart_after: HashSet<usize>,
+    ready_timeout: Duration,
     stopping: bool,
     level: Level,
 }
@@ -344,7 +381,12 @@ impl Supervisor {
             services,
             running: HashMap::new(),
             pending: Vec::new(),
+            pending_start: Vec::new(),
             logs: Vec::new(),
+            notify: Vec::new(),
+            manual_stop: HashSet::new(),
+            restart_after: HashSet::new(),
+            ready_timeout: Duration::from_millis(5_000),
             stopping: false,
             level,
         }
@@ -361,18 +403,39 @@ impl Supervisor {
         self.running.values().any(|run| run.idx == idx)
     }
 
-    /// Start every member of the current runlevel that is not running yet.
-    /// The vector is already in dependency order, so a single pass suffices.
+    pub fn set_ready_timeout(&mut self, timeout: Duration) {
+        self.ready_timeout = timeout;
+    }
+
+    /// Queue every member of the current runlevel that is not running yet.
+    /// `tick()` spawns them once their dependencies are ready.
     pub fn start_members(&mut self) {
         let members = self.members();
+        self.pending_start.clear();
         for idx in 0..self.services.len() {
             if members.contains(&idx) && !self.is_running(idx) {
-                let name = self.services[idx].name.clone();
-                if let Err(e) = self.spawn(idx, 0) {
-                    crate::err!("svc/{name}: cannot start: {e:#}");
-                }
+                self.pending_start.push(idx);
             }
         }
+    }
+
+    fn service_ready(&self, idx: usize) -> bool {
+        if self.services[idx].oneshot {
+            // A oneshot dependency is "ready" once it has run (its exit is
+            // the completion signal), so do not deadlock waiting for READY.
+            return !self.is_running(idx) && !self.pending_start.contains(&idx);
+        }
+        self.running.values().any(|run| run.idx == idx && run.ready)
+    }
+
+    fn deps_ready(&self, idx: usize) -> bool {
+        self.services[idx].depends_on.iter().all(|dep| {
+            self.services
+                .iter()
+                .position(|spec| &spec.name == dep)
+                .map(|dep_idx| self.service_ready(dep_idx))
+                .unwrap_or(true)
+        })
     }
 
     /// Switch to `level`: stop services that no longer belong, drop their
@@ -391,6 +454,7 @@ impl Supervisor {
         let members = self.members();
         self.pending
             .retain(|restart| members.contains(&restart.idx));
+        self.pending_start.retain(|idx| members.contains(idx));
 
         let mut stopping: Vec<(usize, Pid)> = self
             .running
@@ -423,12 +487,43 @@ impl Supervisor {
     }
 
     /// SIGKILL the given service process groups.
-    /// Spawn due restarts. Called from the main loop on every wakeup.
+    /// Start due restarts and services whose dependencies became ready.
+    /// Called from the main loop on every wakeup.
     pub fn tick(&mut self) {
-        if self.stopping || self.pending.is_empty() {
+        if self.stopping {
             return;
         }
         let now = Instant::now();
+
+        // Drop cgroup directories whose processes are gone; remove_dir fails
+        // harmlessly while the service still has processes.
+        for idx in 0..self.services.len() {
+            if !self.is_running(idx) {
+                crate::cgroup::remove(&self.services[idx].name);
+            }
+        }
+
+        // A service that never sends READY=1 must not block its dependents.
+        let mut timed_out = Vec::new();
+        for run in self.running.values_mut() {
+            if !run.ready {
+                if let Some(deadline) = run.ready_deadline {
+                    if now >= deadline {
+                        run.ready = true;
+                        run.ready_deadline = None;
+                        timed_out.push(run.idx);
+                    }
+                }
+            }
+        }
+        for idx in timed_out {
+            crate::warn!(
+                "svc/{}: no READY=1 within {} ms; assuming ready",
+                self.services[idx].name,
+                self.ready_timeout.as_millis()
+            );
+        }
+
         let mut due = Vec::new();
         let mut waiting = Vec::new();
         for item in self.pending.drain(..) {
@@ -445,10 +540,187 @@ impl Supervisor {
                 crate::err!("svc/{name}: cannot restart: {e:#}");
             }
         }
+
+        // Spawn queued members in startup order. A dependency in the same
+        // queue is spawned first, so `deps_ready` sees it as running.
+        let queued = std::mem::take(&mut self.pending_start);
+        let mut blocked = Vec::new();
+        for idx in queued {
+            if self.is_running(idx) {
+                continue;
+            }
+            if !self.deps_ready(idx) {
+                blocked.push(idx);
+                continue;
+            }
+            let name = self.services[idx].name.clone();
+            if let Err(e) = self.spawn(idx, 0) {
+                crate::err!("svc/{name}: cannot start: {e:#}");
+            }
+        }
+        self.pending_start = blocked;
+    }
+
+    /// File descriptors of the sd_notify sockets, for `poll()`.
+    pub fn notify_fds(&self) -> Vec<BorrowedFd<'_>> {
+        self.notify.iter().map(|p| p.fd.as_fd()).collect()
+    }
+
+    /// Read pending sd_notify messages and mark services ready.
+    pub fn drain_notify(&mut self) {
+        let mut ready = Vec::new();
+        let mut status = Vec::new();
+        for pipe in &self.notify {
+            loop {
+                let mut buf = [0u8; 1024];
+                match pipe.fd.recv(&mut buf) {
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&buf[..n]);
+                        for line in text.lines() {
+                            let line = line.trim();
+                            if line == "READY=1" {
+                                ready.push(pipe.name.clone());
+                            } else if let Some(value) = line.strip_prefix("STATUS=") {
+                                status.push((pipe.name.clone(), value.to_string()));
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        crate::warn!("svc/{}: notify socket: {e}", pipe.name);
+                        break;
+                    }
+                }
+            }
+        }
+        for name in ready {
+            let Some(idx) = self.services.iter().position(|s| s.name == name) else {
+                continue;
+            };
+            let mut newly = false;
+            for run in self.running.values_mut() {
+                if run.idx == idx && !run.ready {
+                    run.ready = true;
+                    run.ready_deadline = None;
+                    newly = true;
+                }
+            }
+            if newly {
+                crate::info!("svc/{name}: ready");
+            }
+        }
+        for (name, value) in status {
+            crate::info!("svc/{name}: status: {value}");
+        }
+    }
+
+    /// Runtime control from the control socket.
+    pub fn control(&mut self, name: &str, action: &str) -> Result<String> {
+        let Some(idx) = self.services.iter().position(|spec| spec.name == name) else {
+            bail!("unknown service `{name}`");
+        };
+        if !self.members().contains(&idx) {
+            bail!(
+                "service `{name}` does not belong to runlevel {}",
+                self.level
+            );
+        }
+        match action {
+            "start" => {
+                if self.is_running(idx) {
+                    bail!("service `{name}` is already running");
+                }
+                self.pending_start.retain(|i| *i != idx);
+                self.pending.retain(|item| item.idx != idx);
+                self.spawn(idx, 0)
+                    .with_context(|| format!("cannot start service `{name}`"))?;
+                Ok(format!("ok {name} started"))
+            }
+            "stop" => {
+                let Some(pid) = self.pid_for(idx) else {
+                    return Ok(format!("ok {name} not running"));
+                };
+                self.manual_stop.insert(idx);
+                self.restart_after.remove(&idx);
+                crate::info!("svc/{name}: stopping on request (SIGTERM)");
+                signal_service(pid, Signal::SIGTERM);
+                Ok(format!("ok {name} stopping"))
+            }
+            "restart" => {
+                let Some(pid) = self.pid_for(idx) else {
+                    self.pending_start.retain(|i| *i != idx);
+                    self.spawn(idx, 0)
+                        .with_context(|| format!("cannot start service `{name}`"))?;
+                    return Ok(format!("ok {name} started"));
+                };
+                self.manual_stop.insert(idx);
+                self.restart_after.insert(idx);
+                crate::info!("svc/{name}: restarting on request (SIGTERM)");
+                signal_service(pid, Signal::SIGTERM);
+                Ok(format!("ok {name} restarting"))
+            }
+            "reload" => {
+                let Some(pid) = self.pid_for(idx) else {
+                    bail!("service `{name}` is not running");
+                };
+                crate::info!("svc/{name}: reloading on request (SIGHUP)");
+                signal_service(pid, Signal::SIGHUP);
+                Ok(format!("ok {name} reloaded"))
+            }
+            other => bail!("unknown service action `{other}` (use start, stop, restart or reload)"),
+        }
+    }
+
+    fn pid_for(&self, idx: usize) -> Option<Pid> {
+        self.running
+            .iter()
+            .find(|(_, run)| run.idx == idx)
+            .map(|(pid, _)| *pid)
+    }
+
+    fn notify_socket(&mut self, name: &str) -> Result<String> {
+        let dir = Path::new("/run/jiminit/notify");
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let path = dir.join(format!("{}.sock", name.replace('/', "_")));
+        let _ = std::fs::remove_file(&path);
+        let socket = UnixDatagram::bind(&path)
+            .with_context(|| format!("cannot bind notify socket {}", path.display()))?;
+        socket.set_nonblocking(true)?;
+        // Services may run as unprivileged users and still have to report.
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
+        self.notify.retain(|pipe| pipe.name != name);
+        self.notify.push(NotifyPipe {
+            fd: socket,
+            name: name.to_string(),
+        });
+        Ok(path.display().to_string())
     }
 
     fn spawn(&mut self, idx: usize, failures: u32) -> Result<()> {
         let spec = self.services[idx].clone();
+
+        let credentials = match spec.user.as_deref() {
+            Some(user) => Some(
+                crate::accounts::resolve(
+                    user,
+                    spec.group.as_deref(),
+                    &spec.supplementary_groups,
+                    Path::new(crate::accounts::PASSWD),
+                    Path::new(crate::accounts::GROUP),
+                )
+                .with_context(|| {
+                    format!("cannot resolve user `{user}` for service `{}`", spec.name)
+                })?,
+            ),
+            None => None,
+        };
+        let notify_path = if spec.notify {
+            Some(self.notify_socket(&spec.name)?)
+        } else {
+            None
+        };
+
         let (read_fd, write_fd) = pipe_cloexec().context("pipe")?;
         set_nonblocking(&read_fd);
 
@@ -460,18 +732,28 @@ impl Supervisor {
                     name: spec.name.clone(),
                     buf: Vec::new(),
                 });
+                let ready_deadline = if spec.notify {
+                    Some(Instant::now() + self.ready_timeout)
+                } else {
+                    None
+                };
                 self.running.insert(
                     child,
                     Running {
                         idx,
                         started: Instant::now(),
                         failures,
+                        ready: !spec.notify,
+                        ready_deadline,
                     },
                 );
                 crate::info!("svc/{}: started (pid {child})", spec.name);
+                if let Some(path) = &notify_path {
+                    crate::info!("svc/{}: waiting for READY=1 on {path}", spec.name);
+                }
                 Ok(())
             }
-            ForkResult::Child => child_exec(&spec, write_fd),
+            ForkResult::Child => child_exec(&spec, write_fd, credentials, notify_path),
         }
     }
 
@@ -490,6 +772,19 @@ impl Supervisor {
         }
 
         crate::info!("svc/{}: {} after {:?}", spec.name, describe(status), uptime);
+
+        // A stop requested through the control socket must not be undone by
+        // the restart policy; an explicit restart starts once the exit is seen.
+        if self.manual_stop.remove(&run.idx) {
+            if self.restart_after.remove(&run.idx) {
+                self.pending.push(PendingRestart {
+                    idx: run.idx,
+                    due: Instant::now(),
+                    failures: 0,
+                });
+            }
+            return true;
+        }
 
         // A service stopped because of a runlevel switch must not come back.
         if !self.members().contains(&run.idx) {
@@ -594,6 +889,7 @@ impl Supervisor {
     pub fn stop(&mut self) {
         self.stopping = true;
         self.pending.clear();
+        self.pending_start.clear();
 
         let mut running: Vec<(usize, Pid)> = self
             .running
@@ -611,10 +907,12 @@ impl Supervisor {
 
     /// SIGKILL every service that is still running (shutdown fallback).
     pub fn kill_all(&mut self) {
-        for pid in self.running.keys() {
+        for (pid, run) in &self.running {
+            crate::cgroup::kill(&self.services[run.idx].name);
             signal_service(*pid, Signal::SIGKILL);
         }
         self.pending.clear();
+        self.pending_start.clear();
     }
 }
 
@@ -668,11 +966,19 @@ fn set_nonblocking(fd: &OwnedFd) {
 
 /// Child side: detach from the console, wire stdin to /dev/null and
 /// stdout/stderr to the log pipe, then exec. Never returns.
-fn child_exec(spec: &ServiceSpec, log_fd: OwnedFd) -> ! {
+fn child_exec(
+    spec: &ServiceSpec,
+    log_fd: OwnedFd,
+    credentials: Option<crate::accounts::Credentials>,
+    notify_path: Option<String>,
+) -> ! {
     // Children must not inherit the signal mask blocked for PID 1. Note that
     // unblocking an empty set is a no-op, so replace the whole mask instead.
     clear_signal_mask();
     let _ = nix::unistd::setsid();
+    // Join the service cgroup before dropping privileges: the cgroup files
+    // are owned by root.
+    crate::cgroup::attach(&spec.name, std::process::id());
 
     let log_raw = log_fd.as_raw_fd();
     if let Ok(null) = nix::fcntl::open(
@@ -693,6 +999,10 @@ fn child_exec(spec: &ServiceSpec, log_fd: OwnedFd) -> ! {
         }
     }
 
+    if let Some(creds) = &credentials {
+        drop_privileges(spec, creds);
+    }
+
     let path = match CString::new(spec.exec.as_bytes()) {
         Ok(path) => path,
         Err(_) => child_fail(spec, "exec path contains a NUL byte"),
@@ -705,9 +1015,46 @@ fn child_exec(spec: &ServiceSpec, log_fd: OwnedFd) -> ! {
         }
     }
 
-    let env = build_env(spec);
+    let home = credentials.as_ref().and_then(|c| c.home.as_deref());
+    let env = build_env(spec, notify_path.as_deref(), home);
     let error = nix::unistd::execve(&path, &argv, &env);
     child_fail(spec, &format!("cannot exec {}: {error:?}", spec.exec))
+}
+
+/// Switch to the configured user, groups first, then gid, then uid.
+fn drop_privileges(spec: &ServiceSpec, creds: &crate::accounts::Credentials) {
+    if !creds.groups.is_empty() {
+        let gids: Vec<libc::gid_t> = creds.groups.iter().map(|g| *g as libc::gid_t).collect();
+        if unsafe { libc::setgroups(gids.len(), gids.as_ptr()) } != 0 {
+            child_fail(
+                spec,
+                &format!(
+                    "cannot set supplementary groups: {}",
+                    std::io::Error::last_os_error()
+                ),
+            );
+        }
+    }
+    if unsafe { libc::setgid(creds.gid) } != 0 {
+        child_fail(
+            spec,
+            &format!(
+                "cannot setgid({}): {}",
+                creds.gid,
+                std::io::Error::last_os_error()
+            ),
+        );
+    }
+    if unsafe { libc::setuid(creds.uid) } != 0 {
+        child_fail(
+            spec,
+            &format!(
+                "cannot setuid({}): {}",
+                creds.uid,
+                std::io::Error::last_os_error()
+            ),
+        );
+    }
 }
 
 /// Clear the inherited signal mask (`SIG_SETMASK` with an empty set).
@@ -725,7 +1072,7 @@ fn child_fail(spec: &ServiceSpec, message: &str) -> ! {
     unsafe { libc::_exit(127) }
 }
 
-fn build_env(spec: &ServiceSpec) -> Vec<CString> {
+fn build_env(spec: &ServiceSpec, notify_path: Option<&str>, home: Option<&str>) -> Vec<CString> {
     let mut vars: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     for (key, value) in std::env::vars_os() {
         vars.insert(
@@ -740,8 +1087,15 @@ fn build_env(spec: &ServiceSpec) -> Vec<CString> {
         "PATH",
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     );
-    set("HOME", "/root");
+    set("HOME", home.unwrap_or("/root"));
     set("JIMINIT_SERVICE", &spec.name);
+    if let Some(user) = &spec.user {
+        set("USER", user);
+        set("LOGNAME", user);
+    }
+    if let Some(path) = notify_path {
+        set("NOTIFY_SOCKET", path);
+    }
     for (key, value) in &spec.env {
         set(key, value);
     }
@@ -770,6 +1124,10 @@ mod tests {
             working_dir: None,
             env: BTreeMap::new(),
             runlevels: vec![Level::MultiUser, Level::Graphical],
+            user: None,
+            group: None,
+            supplementary_groups: Vec::new(),
+            notify: false,
         }
     }
 

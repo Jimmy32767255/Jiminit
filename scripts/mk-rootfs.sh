@@ -42,10 +42,12 @@ ln -sf ../bin/busybox "$ROOT/sbin/getty"
 
 cat > "$ROOT/etc/passwd" <<'EOF'
 root:x:0:0:root:/root:/bin/sh
+nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin
 EOF
 
 cat > "$ROOT/etc/group" <<'EOF'
 root:x:0:
+nogroup:x:65534:
 EOF
 
 # Password for root is "jiminit" (SHA-512, salt "jiminit").
@@ -79,6 +81,8 @@ getty_baud = "38400"
 serial_getty_baud = "115200"
 ttys = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
 serial_ttys = ["/dev/ttyS0"]
+cgroup = true
+ready_timeout_ms = 3000
 EOF
 
 cat > "$ROOT/etc/fstab" <<'EOF'
@@ -98,6 +102,37 @@ cat > "$ROOT/etc/jiminit/services.d/failer.toml" <<'EOF'
 exec = "/bin/sh"
 args = ["-c", "echo failing; exit 1"]
 restart = "on-failure"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/cg.toml" <<'EOF'
+# Example: reports the cgroup v2 path it was placed in.
+exec = "/bin/sh"
+args = ["-c", "cat /proc/self/cgroup; sleep 600"]
+restart = "never"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/user.toml" <<'EOF'
+# Example: drops privileges to nobody.
+exec = "/bin/sh"
+args = ["-c", "id -u; id -g; sleep 600"]
+user = "nobody"
+restart = "never"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/notifier.toml" <<'EOF'
+# Example: announces readiness through sd_notify after one second.
+exec = "/bin/sh"
+args = ["-c", "sleep 1; /sbin/jiminit --notify-send \"$NOTIFY_SOCKET\" READY=1; sleep 600"]
+notify = true
+restart = "never"
+EOF
+
+cat > "$ROOT/etc/jiminit/services.d/after.toml" <<'EOF'
+# Example: depends on notifier and must only start once it is ready.
+exec = "/bin/sh"
+args = ["-c", "echo AFTER-STARTED; sleep 600"]
+depends_on = ["notifier"]
+restart = "never"
 EOF
 
 rm -f "$IMAGE"

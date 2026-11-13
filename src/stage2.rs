@@ -427,8 +427,20 @@ fn child_shell(console: &str, shell: &str) -> ! {
     attach_console(console);
 
     let name = shell.rsplit('/').next().unwrap_or("sh");
-    let argv0 = CString::new(format!("-{name}")).expect("argv0 has no NUL");
-    let path = CString::new(shell).expect("shell path has no NUL");
+    let argv0 = match CString::new(format!("-{name}")) {
+        Ok(argv0) => argv0,
+        Err(_) => {
+            crate::err!("shell name contains a NUL byte");
+            unsafe { libc::_exit(127) }
+        }
+    };
+    let path = match CString::new(shell) {
+        Ok(path) => path,
+        Err(_) => {
+            crate::err!("shell path contains a NUL byte");
+            unsafe { libc::_exit(127) }
+        }
+    };
     let env = shell_env(shell);
     let args = [argv0];
 
@@ -523,16 +535,26 @@ fn control_listener() -> Option<UnixListener> {
     let _ = std::fs::remove_file(CONTROL_PATH);
 
     match UnixListener::bind(CONTROL_PATH) {
-        Ok(listener) => match listener.set_nonblocking(true) {
-            Ok(()) => {
-                crate::info!("control socket listening on {CONTROL_PATH}");
-                Some(listener)
+        Ok(listener) => {
+            // The socket can power the machine off, so keep it root-only
+            // regardless of the umask PID 1 inherited.
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(CONTROL_PATH, std::fs::Permissions::from_mode(0o600))
+            {
+                crate::warn!("cannot restrict {CONTROL_PATH} to root: {e}");
             }
-            Err(e) => {
-                crate::warn!("cannot make {CONTROL_PATH} nonblocking: {e}");
-                None
+            match listener.set_nonblocking(true) {
+                Ok(()) => {
+                    crate::info!("control socket listening on {CONTROL_PATH}");
+                    Some(listener)
+                }
+                Err(e) => {
+                    crate::warn!("cannot make {CONTROL_PATH} nonblocking: {e}");
+                    None
+                }
             }
-        },
+        }
         Err(e) => {
             crate::warn!("cannot create {CONTROL_PATH}: {e}");
             None
@@ -670,7 +692,7 @@ fn stop_getties(getties: &mut Vec<Getty>) -> Vec<Pid> {
     let mut pids = Vec::new();
     for getty in getties.drain(..) {
         crate::info!("getty on {}: stopping (SIGHUP)", getty.tty);
-        let _ = kill(getty.pid, Signal::SIGHUP);
+        signal_tree(getty.pid, Signal::SIGHUP);
         pids.push(getty.pid);
     }
     pids
@@ -679,8 +701,18 @@ fn stop_getties(getties: &mut Vec<Getty>) -> Vec<Pid> {
 fn stop_single_shell(single_shell: &mut Option<Pid>) -> Option<Pid> {
     let pid = single_shell.take()?;
     crate::info!("single-user shell {pid}: stopping (SIGHUP)");
-    let _ = kill(pid, Signal::SIGHUP);
+    signal_tree(pid, Signal::SIGHUP);
     Some(pid)
+}
+
+/// Signal a process and its process group. The group catches children that
+/// were forked but have not called setsid yet (their pid is not a group id
+/// then), and the plain pid still works after the leader is gone.
+fn signal_tree(pid: Pid, signal: Signal) {
+    let _ = kill(pid, signal);
+    if pid.as_raw() > 1 {
+        let _ = kill(Pid::from_raw(-pid.as_raw()), signal);
+    }
 }
 
 fn pid_alive(pid: Pid) -> bool {
@@ -708,7 +740,7 @@ fn wait_for(supervisor: &mut Supervisor, pids: &[Pid], timeout: Duration) {
             crate::warn!("processes did not stop for the runlevel change; sending SIGKILL");
             for pid in pids {
                 // Login sessions are process groups led by getty/shell.
-                let _ = kill(Pid::from_raw(-pid.as_raw()), Signal::SIGKILL);
+                signal_tree(*pid, Signal::SIGKILL);
             }
             let hard = Instant::now() + Duration::from_secs(1);
             while Instant::now() < hard {
@@ -767,9 +799,15 @@ fn shutdown(
     // services get a graceful SIGTERM.
     stop_getties(getties);
     if let Some(pid) = single_shell {
-        let _ = kill(pid, Signal::SIGHUP);
+        signal_tree(pid, Signal::SIGHUP);
     }
     supervisor.stop();
+
+    // Sessions and services have been asked to stop; this also reaches their
+    // children (login, shells, shell jobs) which are not PID 1's own children
+    // and would otherwise still write to the filesystems when we remount them
+    // read-only.
+    let _ = kill(Pid::from_raw(-1), Signal::SIGTERM);
 
     // Phase 1: give everything shutdown_timeout_ms to exit after SIGTERM.
     // Phase 2: SIGKILL whatever is left, then wait a little longer.
@@ -788,20 +826,21 @@ fn shutdown(
         }
         supervisor.drain_logs();
 
-        if all_gone {
+        let others = live_user_processes();
+        if all_gone && others == 0 {
             break;
         }
 
         let now = Instant::now();
         match hard_deadline {
             None if now >= deadline => {
-                crate::warn!("timed out waiting for processes; sending SIGKILL");
+                crate::warn!("timed out waiting for {others} process(es); sending SIGKILL");
                 supervisor.kill_all();
                 let _ = kill(Pid::from_raw(-1), Signal::SIGKILL);
                 hard_deadline = Some(now + Duration::from_secs(2));
             }
             Some(hard) if now >= hard => {
-                crate::warn!("processes survived SIGKILL; continuing anyway");
+                crate::warn!("{others} process(es) survived SIGKILL; continuing anyway");
                 break;
             }
             _ => {}
@@ -839,6 +878,26 @@ fn shutdown(
     loop {
         std::thread::sleep(Duration::from_secs(60));
     }
+}
+
+/// Number of live user processes other than PID 1. Kernel threads have no
+/// `/proc/<pid>/exe` and dead processes (zombies) are unreadable too, so this
+/// only counts processes that can still touch the filesystems.
+fn live_user_processes() -> usize {
+    let self_pid = nix::unistd::getpid().as_raw();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let Some(pid) = name.to_str().and_then(|name| name.parse::<i32>().ok()) else {
+                return false;
+            };
+            pid > 1 && pid != self_pid && std::fs::read_link(entry.path().join("exe")).is_ok()
+        })
+        .count()
 }
 
 /// Clear the transient directories and exec a fresh stage 2 in this same PID,
@@ -896,7 +955,10 @@ fn next_soft_reboot_count() -> u32 {
 }
 
 fn parse_soft_reboot_count(value: Option<&str>) -> u32 {
-    value.and_then(|value| value.parse().ok()).unwrap_or(0) + 1
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0u32)
+        .saturating_add(1)
 }
 
 fn soft_reboot_env(count: u32) -> Vec<CString> {

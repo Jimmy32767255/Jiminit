@@ -100,11 +100,14 @@ pub fn parse_service(name: &str, text: &str) -> Result<ServiceSpec> {
         bail!("service `{name}` has no `exec`");
     }
 
-    // Allow `exec = "/bin/sh -c '...'"` when no explicit `args` are given.
-    let mut words = file.exec.split_whitespace();
-    let (exec, args) = if file.args.is_empty() && words.clone().count() > 1 {
-        let program = words.next().expect("split produced a word").to_string();
-        (program, words.map(ToString::to_string).collect())
+    // Allow `exec = "/bin/sh -c 'echo hi'"` when no explicit `args` are given;
+    // only shell-like quoting is understood, there is no expansion.
+    let (exec, args) = if file.args.is_empty() {
+        let mut words = split_command(&file.exec)
+            .with_context(|| format!("service `{name}` has an invalid `exec`"))?
+            .into_iter();
+        let program = words.next().expect("checked to be non-empty above");
+        (program, words.collect())
     } else {
         (file.exec.clone(), file.args.clone())
     };
@@ -120,6 +123,68 @@ pub fn parse_service(name: &str, text: &str) -> Result<ServiceSpec> {
         env: file.env,
         runlevels: parse_runlevels(name, &file.runlevels)?,
     })
+}
+
+/// Split a command into words using shell-like quoting: whitespace separates
+/// words, single and double quotes group, and a backslash escapes the next
+/// character (outside single quotes). No variables or globbing are expanded.
+fn split_command(text: &str) -> Result<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else if c == '\\' && q == '"' {
+                    match chars.next() {
+                        Some(escaped @ ('"' | '\\')) => word.push(escaped),
+                        Some(other) => {
+                            word.push('\\');
+                            word.push(other);
+                        }
+                        None => word.push('\\'),
+                    }
+                } else {
+                    word.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    in_word = true;
+                }
+                '\\' => {
+                    if let Some(escaped) = chars.next() {
+                        word.push(escaped);
+                        in_word = true;
+                    }
+                }
+                c if c.is_whitespace() => {
+                    if in_word {
+                        words.push(std::mem::take(&mut word));
+                        in_word = false;
+                    }
+                }
+                c => {
+                    word.push(c);
+                    in_word = true;
+                }
+            },
+        }
+    }
+
+    if quote.is_some() {
+        bail!("unterminated quote");
+    }
+    if in_word {
+        words.push(word);
+    }
+    Ok(words)
 }
 
 fn load_dir(dir: &Path) -> Result<Vec<ServiceSpec>> {
@@ -339,7 +404,7 @@ impl Supervisor {
                 "svc/{}: stopping for runlevel change (SIGTERM)",
                 self.services[idx].name
             );
-            let _ = kill(Pid::from_raw(-pid.as_raw()), Signal::SIGTERM);
+            signal_service(pid, Signal::SIGTERM);
         }
     }
 
@@ -540,16 +605,26 @@ impl Supervisor {
         for (idx, pid) in running {
             let name = &self.services[idx].name;
             crate::info!("svc/{name}: stopping (SIGTERM)");
-            let _ = kill(Pid::from_raw(-pid.as_raw()), Signal::SIGTERM);
+            signal_service(pid, Signal::SIGTERM);
         }
     }
 
     /// SIGKILL every service that is still running (shutdown fallback).
     pub fn kill_all(&mut self) {
         for pid in self.running.keys() {
-            let _ = kill(Pid::from_raw(-pid.as_raw()), Signal::SIGKILL);
+            signal_service(*pid, Signal::SIGKILL);
         }
         self.pending.clear();
+    }
+}
+
+/// Signal a service process and its process group. Before the child reaches
+/// setsid its pid is not a group id, and after the leader exits the group can
+/// still hold children, so both targets are needed.
+fn signal_service(pid: Pid, signal: Signal) {
+    let _ = kill(pid, signal);
+    if pid.as_raw() > 1 {
+        let _ = kill(Pid::from_raw(-pid.as_raw()), signal);
     }
 }
 
@@ -736,6 +811,25 @@ oneshot = true
         let svc = parse_service("demo", "exec = \"/bin/sh -c true\"\n").unwrap();
         assert_eq!(svc.exec, "/bin/sh");
         assert_eq!(svc.args, ["-c", "true"]);
+    }
+
+    #[test]
+    fn exec_split_supports_quotes_and_escapes() {
+        assert_eq!(
+            split_command("/bin/sh -c 'echo hello world'").unwrap(),
+            ["/bin/sh", "-c", "echo hello world"]
+        );
+        assert_eq!(
+            split_command("echo hello\\ world").unwrap(),
+            ["echo", "hello world"]
+        );
+        assert_eq!(split_command(r#""a b" c"#).unwrap(), ["a b", "c"]);
+    }
+
+    #[test]
+    fn rejects_unterminated_quotes() {
+        assert!(split_command("/bin/sh -c 'oops").is_err());
+        assert!(parse_service("demo", "exec = \"/bin/sh -c 'oops\"\n").is_err());
     }
 
     #[test]

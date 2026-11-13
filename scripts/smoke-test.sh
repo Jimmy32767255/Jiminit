@@ -81,6 +81,8 @@ printf 'jiminit --status\n' >"$FIFO"
 wait_for 'status multi-user' 20
 printf 'id\n' >"$FIFO"
 wait_for 'uid=0(root)' 20
+printf 'ls -l /run/jiminit.sock\n' >"$FIFO"
+wait_for 'srw-------' 20
 
 # 2. Switch to single: the login session is stopped and a root shell takes
 #    over the console. The client runs in that dying session, so verify the
@@ -137,6 +139,7 @@ grep -q 'SINGLE-SHELL-OK' "$LOG" || fail "single-user shell did not run commands
 grep -q 'switching runlevel single -> multi-user' "$LOG" || fail "runlevel switch back did not happen"
 grep -q 'now in runlevel multi-user' "$LOG" || fail "init did not return to multi-user"
 grep -q 'uid=0(root)' "$LOG" || fail "login did not give a root shell"
+grep -q 'srw-------' "$LOG" || fail "control socket is not root-only"
 grep -q 'svc/ticker: tick' "$LOG" || fail "ticker service output was not forwarded"
 grep -q 'svc/failer: restarting' "$LOG" || fail "failed service was not restarted"
 grep -q 'SIGUSR1: soft reboot' "$LOG" || fail "SIGUSR1 did not trigger a soft reboot"

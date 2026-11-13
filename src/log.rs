@@ -22,7 +22,10 @@ pub fn init() {
 }
 
 fn emit(level: u8, msg: &str) {
-    eprintln!("jiminit: {msg}");
+    // PID 1 must never panic because a log target is broken (for example the
+    // console disappeared), so ignore write errors instead of using eprintln!,
+    // which panics if writing to stderr fails.
+    let _ = writeln!(std::io::stderr(), "jiminit: {msg}");
     if let Some(Some(kmsg)) = KMSG.get() {
         if let Ok(mut file) = kmsg.lock() {
             // /dev/kmsg treats every write() as one record, so build the full

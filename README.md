@@ -77,7 +77,8 @@ scripts/
    外部 `login`；getty 退出后 500ms 重新拉起。single 级：直接在 console 上 fork 一个
    root shell（argv0 带 `-` 前缀），退出后按 `respawn` 决定是否重新拉起；
 6. 每次唤醒回收所有子进程：服务退出交给监督器，getty 退出触发重拉，其他孤儿只记录；
-7. 监听 `/run/jiminit.sock`，接受 `status` 与 `runlevel <name>` 请求（见下文）；
+7. 监听 `/run/jiminit.sock`（权限 `0600`，仅 root 可控制），接受 `status` 与
+   `runlevel <name>` 请求（见下文）；
 8. `SIGINT`（ctrl-alt-del）：重启；`SIGTERM`：关机；`SIGUSR1`：软重启；
 9. 关机流程：SIGHUP 结束所有 getty/单用户 shell → 按启动逆序给服务发 SIGTERM → 等待
    `shutdown_timeout_ms` → 剩余进程 SIGKILL → `sync` → 根重新挂载为只读 →
@@ -125,6 +126,7 @@ jiminit --runlevel reboot       # 6 / reboot 触发重启；0 / poweroff / halt 
 
 ```toml
 exec = "/bin/sh"            # 可执行文件；写成带空格的一行时自动拆成 argv
+                            # （支持单/双引号与反斜杠转义，但不会展开变量）
 args = ["-c", "echo hi"]    # 显式参数（优先于上面的自动拆分）
 depends_on = ["network"]    # 依赖的服务名
 restart = "on-failure"      # always | on-failure | never（默认 on-failure）
@@ -203,6 +205,7 @@ console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw
 - 服务：`ticker` 每秒输出并被转发到 kmsg（`svc/ticker: tick`）；
   `failer` 退出码 1 后按 1s→2s→4s 退避重启；关机时 `ticker` 收到 SIGTERM 退出；
 - `jiminit --status` 返回 `status multi-user`；
+- 控制 socket 权限为 `0600`，非 root 用户无法查询或切换运行级；
 - `jiminit --runlevel single` → 停 getty/ticker → `now in runlevel single`，
   console 上出现单用户 root shell；`jiminit --runlevel multi-user` → 重新起 getty，
   可以再次登录；

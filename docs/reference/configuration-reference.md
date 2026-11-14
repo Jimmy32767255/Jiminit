@@ -49,11 +49,13 @@
 | `watchdog` | string | 无 | 看门狗周期，如 `"30s"`、`"500ms"` |
 | `[limits].memory_max` | string | 无 | 字节或 `K/M/G/T` 后缀，或 `"max"` |
 | `[limits].pids_max` | int | 无 | 最大任务数 |
+| `log_file` | string | 无 | 该服务 stdout/stderr 追加到此文件（1 MiB 轮转为 `.1`），不再进 init 日志 |
 | `[limits].cpu_max` | string | 无 | `"quota period"`，单位微秒 |
 
 看门狗时长单位：`ms`/`s`/`m`/`h`/`d`，裸数字按秒；0 和小数非法。
 
-服务输出进 `/dev/kmsg`，行首 `svc/<name>: `。
+默认服务输出进 init 日志（stderr、`/dev/kmsg`、`log_file`），行首 `svc/<name>: `；
+设置服务级 `log_file` 后改为写该文件，init 日志里只保留 `svc/<name>: started` 这类事件。
 
 ## 根设备与内核命令行
 

@@ -13,13 +13,16 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
   coldplug、`fsck -p`、fstab 额外挂载、`pivot_root`（含独立 `/usr`）、crypttab
   LUKS 解锁与按需 LVM 激活。
 - **服务监督**：`/etc/jiminit/services.d/*.toml`，依赖拓扑、重启退避、sd_notify
-  就绪与看门狗、cgroup v2 资源限制与 OOM 报告、user/group 降权、控制 socket。
+  就绪与看门狗、cgroup v2 资源限制与 OOM 报告、user/group 降权、控制 socket；
+  每个服务可用 `log_file` 单独记日志（1 MiB 轮转）。
 - **观测**：`jiminit --status` 查看每个服务的 pid/重启次数/就绪/内存/CPU/pids/io，
   `jiminit --metrics` 输出 Prometheus 文本。
 - **会话**：为多个 tty 拉起 getty，认证交给外部 `login`；`single`/`multi-user`/
   `graphical` 运行级可运行时切换；`SIGUSR1` 软重启（exec 自己）。
 - **CLI 体验**：日志带相对时间与 `[  OK  ]`/`[ WARN ]`/`[ FAIL ]` 标签（`color`
   可配），`jiminit --check` 打印缩进依赖树，`jiminit --graph` 输出 DOT 依赖图。
+- **dinit 迁移示例**：`contrib/host/services/` 把本机 dinit 的 bluetoothd、sshd、
+  tor、ipfs、i2pd、mihomo、libvirtd、userspawn、zram 等翻译成 jiminit 服务。
 - **可交付**：静态构建脚本、四种 QEMU 冒烟测试、install.sh、PKGBUILD、
   mkinitcpio hook、aarch64 构建路径。
 
@@ -63,7 +66,7 @@ jiminit --graph   # Graphviz DOT
 
 ## 项目状态
 
-- 77 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
+- 83 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
   coldplug+真实 fsck 三条冒烟路径各自 PASS。
 - 只在 QEMU x86_64 上验证过；aarch64 只验证了构建路径，未实机测试。
 - 这是个人实验项目，不追求 systemd 兼容，也不适合直接替换生产环境的 init。

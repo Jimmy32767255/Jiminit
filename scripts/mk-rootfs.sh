@@ -106,6 +106,14 @@ args = ["-c", "while true; do echo tick; sleep 1; done"]
 restart = "always"
 EOF
 
+cat > "$ROOT/etc/jiminit/services.d/logged.toml" <<'TOMLEOF'
+# Example service: output goes to its own file, exercised by the smoke test.
+exec = "/bin/sh"
+args = ["-c", "while true; do echo LOGGED-LINE; sleep 1; done"]
+restart = "always"
+log_file = "/var/log/jiminit/logged.log"
+TOMLEOF
+
 cat > "$ROOT/etc/jiminit/services.d/failer.toml" <<'EOF'
 # Example service: always fails, to exercise the backoff restart logic.
 exec = "/bin/sh"

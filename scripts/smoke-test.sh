@@ -118,6 +118,8 @@ wait_for 'now in runlevel single' 20
 sleep 1
 printf 'echo SINGLE-SHELL-OK\n' >"$FIFO"
 wait_for 'SINGLE-SHELL-OK' 20
+printf 'cat /var/log/jiminit/logged.log\n' >"$FIFO"
+wait_for 'LOGGED-LINE' 20
 
 # 4. Switch back to multi-user: getty must come back.
 printf 'jiminit --runlevel multi-user &\n' >"$FIFO"
@@ -183,6 +185,7 @@ grep -q 'status multi-user' "$LOG" || fail "--status did not report the runlevel
 grep -q 'switching runlevel multi-user -> single' "$LOG" || fail "runlevel switch to single did not happen"
 grep -q 'now in runlevel single' "$LOG" || fail "init did not enter the single runlevel"
 grep -q 'SINGLE-SHELL-OK' "$LOG" || fail "single-user shell did not run commands"
+grep -q 'LOGGED-LINE' "$LOG" || fail "per-service log file did not receive output"
 grep -q 'switching runlevel single -> multi-user' "$LOG" || fail "runlevel switch back did not happen"
 grep -q 'now in runlevel multi-user' "$LOG" || fail "init did not return to multi-user"
 grep -q 'uid=0(root)' "$LOG" || fail "login did not give a root shell"

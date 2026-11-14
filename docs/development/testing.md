@@ -8,7 +8,7 @@
 cargo test
 ```
 
-当前 77 个用例。覆盖：cmdline、配置严格解析、fstab 解析与挂载点规范化、UUID/GPT/MBR（含 FAT/exFAT 短 UUID）、
+当前 83 个用例。覆盖：cmdline、配置严格解析、fstab 解析与挂载点规范化、UUID/GPT/MBR（含 FAT/exFAT 短 UUID）、
 LUKS 头探测、crypttab、modprobe.d 规则、coldplug alias 收集、运行级、服务解析与
 引号拆分、依赖闭包、退避上限、看门狗时长、cgroup 限制校验、字节格式化、软重启计数。
 

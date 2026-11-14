@@ -84,6 +84,8 @@ pub struct ServiceSpec {
     pub watchdog: Option<Duration>,
     /// cgroup v2 resource limits (empty means unlimited).
     pub limits: Limits,
+    /// Append stdout/stderr here instead of forwarding to the init log.
+    pub log_file: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -106,6 +108,8 @@ struct ServiceFile {
     watchdog: Option<String>,
     #[serde(default)]
     limits: LimitsFile,
+    /// Per-service append log file (1 MiB rotation at spawn).
+    log_file: Option<String>,
 }
 
 fn default_runlevels() -> Vec<Level> {
@@ -170,6 +174,7 @@ pub fn parse_service(name: &str, text: &str) -> Result<ServiceSpec> {
         notify: file.notify,
         watchdog: parse_watchdog(name, file.watchdog.as_deref())?,
         limits: parse_limits(name, file.limits)?,
+        log_file: file.log_file.filter(|path| !path.trim().is_empty()),
     })
 }
 
@@ -1192,8 +1197,25 @@ impl Supervisor {
         );
         let oom_seen = crate::cgroup::oom_kill_count(&spec.name);
 
-        let (read_fd, write_fd) = pipe_cloexec().context("pipe")?;
-        set_nonblocking(&read_fd);
+        let (read_fd, write_fd) = match spec.log_file.as_deref() {
+            Some(path) => match open_service_log(path) {
+                Ok(fd) => (None, fd),
+                Err(e) => {
+                    crate::warn!(
+                        "svc/{}: cannot open log file {path}: {e}; using the init log",
+                        spec.name
+                    );
+                    let (read_fd, write_fd) = pipe_cloexec().context("pipe")?;
+                    set_nonblocking(&read_fd);
+                    (Some(read_fd), write_fd)
+                }
+            },
+            None => {
+                let (read_fd, write_fd) = pipe_cloexec().context("pipe")?;
+                set_nonblocking(&read_fd);
+                (Some(read_fd), write_fd)
+            }
+        };
 
         self.starts[idx] += 1;
         self.failed.remove(&idx);
@@ -1201,11 +1223,13 @@ impl Supervisor {
         match unsafe { fork() }.context("fork")? {
             ForkResult::Parent { child } => {
                 drop(write_fd);
-                self.logs.push(LogPipe {
-                    fd: read_fd,
-                    name: spec.name.clone(),
-                    buf: Vec::new(),
-                });
+                if let Some(read_fd) = read_fd {
+                    self.logs.push(LogPipe {
+                        fd: read_fd,
+                        name: spec.name.clone(),
+                        buf: Vec::new(),
+                    });
+                }
                 let ready_deadline = if spec.notify {
                     Some(Instant::now() + self.ready_timeout)
                 } else {
@@ -1472,6 +1496,30 @@ fn set_nonblocking(fd: &OwnedFd) {
 
 /// Child side: detach from the console, wire stdin to /dev/null and
 /// stdout/stderr to the log pipe, then exec. Never returns.
+/// Open (and rotate) a per-service log file, returning the fd handed to the
+/// child as stdout/stderr.
+fn open_service_log(path: &str) -> Result<OwnedFd> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const MAX_BYTES: u64 = 1 << 20;
+    let path = Path::new(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > MAX_BYTES {
+        let rotated = path.with_extension("log.1");
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(path, rotated);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o644)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    Ok(OwnedFd::from(file))
+}
+
 fn child_exec(
     spec: &ServiceSpec,
     log_fd: OwnedFd,
@@ -1498,6 +1546,10 @@ fn child_exec(
     let _ = unsafe { libc::dup2(log_raw, 2) };
     // Keep the log fd alive across exec is not needed: 1 and 2 are the copies.
     std::mem::forget(log_fd);
+    // Do not leak PID 1's sockets or the initramfs fds into services.
+    for fd in 3..=1024 {
+        unsafe { libc::close(fd) };
+    }
 
     if let Some(dir) = &spec.working_dir {
         if let Err(e) = std::env::set_current_dir(dir) {
@@ -1685,6 +1737,7 @@ mod tests {
             notify: false,
             watchdog: None,
             limits: Limits::default(),
+            log_file: None,
         }
     }
 
@@ -1917,6 +1970,17 @@ oneshot = true
         assert_eq!(human_bytes_zero(2048), "2.0K");
         assert_eq!(human_bytes(0), "-");
     }
+    #[test]
+    fn host_profile_services_parse_and_are_acyclic() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("contrib/host/services");
+        let services = load_dir(&dir).expect("host service files");
+        assert!(services.len() >= 20, "only {} services", services.len());
+        let (order, cyclic) = startup_order(&services);
+        assert!(cyclic.is_empty(), "dependency cycle: {cyclic:?}");
+        assert_eq!(order.len(), services.len());
+        assert!(services.iter().any(|spec| spec.name == "userspawn"));
+    }
+
     #[test]
     fn dependency_tree_is_indented() {
         let services = vec![spec("a", &[]), spec("b", &["a"]), spec("c", &["a"])];

@@ -159,15 +159,82 @@ fn write_limit(dir: &Path, file: &str, value: &str) {
     }
 }
 
-/// Current memory usage of the service cgroup in bytes (0 when unavailable).
-pub fn memory_current(name: &str) -> u64 {
-    let Some(dir) = service_dir(name) else {
-        return 0;
+/// Accounting values for one service cgroup. `None` means the file (and thus
+/// the controller behind it) is not available; statistics never create the
+/// cgroup directory, so asking about a stopped service is harmless.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    pub cpu_usec: Option<u64>,
+    pub memory: Option<u64>,
+    pub memory_peak: Option<u64>,
+    pub pids: Option<u64>,
+    pub io_read: Option<u64>,
+    pub io_write: Option<u64>,
+}
+
+pub fn stats(name: &str) -> Stats {
+    let Some(dir) = existing_dir(name) else {
+        return Stats::default();
     };
-    std::fs::read_to_string(dir.join("memory.current"))
-        .ok()
-        .and_then(|text| text.trim().parse().ok())
-        .unwrap_or(0)
+    let io = read_file(&dir, "io.stat").and_then(|text| parse_io_stat(&text));
+    Stats {
+        cpu_usec: read_file(&dir, "cpu.stat").and_then(|text| parse_cpu_stat(&text)),
+        memory: read_file(&dir, "memory.current").and_then(|text| parse_u64(&text)),
+        memory_peak: read_file(&dir, "memory.peak").and_then(|text| parse_u64(&text)),
+        pids: read_file(&dir, "pids.current").and_then(|text| parse_u64(&text)),
+        io_read: io.map(|(read, _)| read),
+        io_write: io.map(|(_, write)| write),
+    }
+}
+
+/// Existing cgroup directory, without creating it.
+fn existing_dir(name: &str) -> Option<PathBuf> {
+    if !is_enabled() {
+        return None;
+    }
+    let dir = Path::new(CGROUP_ROOT).join(SUBTREE).join(sanitize(name));
+    dir.is_dir().then_some(dir)
+}
+
+fn read_file(dir: &Path, file: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join(file)).ok()
+}
+
+fn parse_u64(text: &str) -> Option<u64> {
+    text.trim().parse().ok()
+}
+
+fn parse_cpu_stat(text: &str) -> Option<u64> {
+    text.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        match (parts.next(), parts.next()) {
+            (Some("usage_usec"), Some(value)) => value.parse().ok(),
+            _ => None,
+        }
+    })
+}
+
+/// Sum `rbytes`/`wbytes` over all devices in an `io.stat` file.
+fn parse_io_stat(text: &str) -> Option<(u64, u64)> {
+    let mut read = 0;
+    let mut write = 0;
+    let mut any = false;
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next().is_none() {
+            continue;
+        }
+        for field in parts {
+            if let Some(value) = field.strip_prefix("rbytes=") {
+                read += value.parse::<u64>().unwrap_or(0);
+                any = true;
+            } else if let Some(value) = field.strip_prefix("wbytes=") {
+                write += value.parse::<u64>().unwrap_or(0);
+                any = true;
+            }
+        }
+    }
+    any.then_some((read, write))
 }
 
 /// Number of OOM kills recorded for this service cgroup.
@@ -217,5 +284,20 @@ mod tests {
         assert_eq!(sanitize("ticker"), "ticker");
         assert_eq!(sanitize("a/b:c d"), "a_b_c_d");
         assert_eq!(sanitize("db-1.2"), "db-1.2");
+    }
+
+    #[test]
+    fn parses_cpu_stat() {
+        let text = "usage_usec 12345\nuser_usec 10000\nsystem_usec 2345\n";
+        assert_eq!(parse_cpu_stat(text), Some(12345));
+        assert_eq!(parse_cpu_stat("user_usec 1\n"), None);
+    }
+
+    #[test]
+    fn parses_io_stat_across_devices() {
+        let text = "8:0 rbytes=100 wbytes=200 rios=1 wios=2 dbytes=0 dios=0\n\
+                    8:16 rbytes=300 wbytes=400 rios=3 wios=4 dbytes=0 dios=0\n";
+        assert_eq!(parse_io_stat(text), Some((400, 600)));
+        assert_eq!(parse_io_stat(""), None);
     }
 }

@@ -14,6 +14,8 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
   LUKS 解锁与按需 LVM 激活。
 - **服务监督**：`/etc/jiminit/services.d/*.toml`，依赖拓扑、重启退避、sd_notify
   就绪与看门狗、cgroup v2 资源限制与 OOM 报告、user/group 降权、控制 socket。
+- **观测**：`jiminit --status` 查看每个服务的 pid/重启次数/就绪/内存/CPU/pids/io，
+  `jiminit --metrics` 输出 Prometheus 文本。
 - **会话**：为多个 tty 拉起 getty，认证交给外部 `login`；`single`/`multi-user`/
   `graphical` 运行级可运行时切换；`SIGUSR1` 软重启（exec 自己）。
 - **可交付**：静态构建脚本、四种 QEMU 冒烟测试、install.sh、PKGBUILD、

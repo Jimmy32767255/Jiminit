@@ -44,6 +44,7 @@ jiminit --runlevel single
 jiminit --runlevel 3           # 数字别名
 jiminit --runlevel reboot      # 6/reboot 重启；0/poweroff/halt 关机
 jiminit --service ticker restart
+jiminit --metrics               # Prometheus 文本
 ```
 
 `--runlevel 0|6` 不会“进入”某个级别，而是直接走关机/重启流程。未知级别返回
@@ -53,13 +54,28 @@ jiminit --service ticker restart
 
 ```text
 status multi-user
-cg running pid=118 restarts=0 ready=yes memory=1.2M
-after stopped pid=- restarts=1 ready=- memory=-
+ticker running pid=126 restarts=0 ready=yes memory=84.0K cpu=5.0ms peak=256.0K pids=1 io=-
+after stopped pid=- restarts=1 ready=- memory=- cpu=- peak=- pids=- io=-
 ```
 
 字段：服务名、`running`/`stopped`、pid、启动次数（本次 stage2 以来，手动 start
-也算；软重启会重置）、是否就绪（非 notify 服务启动即 yes）、`memory.current`
-（未启用 memory 控制器时为 `-`）。
+也算；软重启会重置）、是否就绪（非 notify 服务启动即 yes）、`memory.current`、
+CPU 累计时间、`memory.peak`、`pids.current`、io 读写字节。没有对应控制器的字段
+显示 `-`；`io` 只在启用 io 控制器时才有值（当前没有 io 限制配置，所以通常是
+`-`）。
+
+`jiminit --metrics` 输出同一份数据的 Prometheus 文本格式，可直接交给抓取器：
+
+```text
+jiminit_build_info{version="0.1.0"} 1
+jiminit_runlevel_info{runlevel="multi-user"} 1
+jiminit_service_info{name="ticker",state="running",ready="yes"} 1
+jiminit_service_restarts_total{name="ticker"} 0
+jiminit_service_cpu_seconds_total{name="ticker"} 0.005000
+jiminit_service_memory_bytes{name="ticker"} 86016
+```
+
+缺失的指标整行省略，不会输出 `NaN` 或空值。
 
 实现上每次请求只处理一个连接：accept 后设 500ms 超时，读一行，执行，回写，关闭。
 所以极慢的客户端最多阻塞主循环约 1 秒。

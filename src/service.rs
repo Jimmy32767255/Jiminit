@@ -692,23 +692,143 @@ impl Supervisor {
             let restarts = self.starts[idx].saturating_sub(1);
             let line = match running {
                 Some((pid, run)) => {
-                    let memory = crate::cgroup::memory_current(&spec.name);
+                    let stats = crate::cgroup::stats(&spec.name);
                     format!(
-                        "{} running pid={} restarts={restarts} ready={} memory={}",
+                        "{} running pid={} restarts={restarts} ready={} memory={} cpu={} peak={} pids={} io={}",
                         spec.name,
                         pid.as_raw(),
                         if run.ready { "yes" } else { "no" },
-                        human_bytes(memory)
+                        stats.memory.map(human_bytes).unwrap_or_else(|| "-".into()),
+                        stats
+                            .cpu_usec
+                            .map(human_duration)
+                            .unwrap_or_else(|| "-".into()),
+                        stats
+                            .memory_peak
+                            .map(human_bytes)
+                            .unwrap_or_else(|| "-".into()),
+                        stats
+                            .pids
+                            .map(|pids| pids.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        match (stats.io_read, stats.io_write) {
+                            (Some(read), Some(write)) => format!(
+                                "{}/{}",
+                                human_bytes_zero(read),
+                                human_bytes_zero(write)
+                            ),
+                            _ => "-".to_string(),
+                        }
                     )
                 }
                 None => format!(
-                    "{} stopped pid=- restarts={restarts} ready=- memory=-",
+                    "{} stopped pid=- restarts={restarts} ready=- memory=- cpu=- peak=- pids=- io=-",
                     spec.name
                 ),
             };
             lines.push(line);
         }
         lines
+    }
+
+    /// Prometheus text exposition for all services plus the current runlevel.
+    pub fn metrics(&self, runlevel: &str) -> String {
+        let mut out = String::new();
+        out.push_str("# HELP jiminit_build_info Build information for this init.\n");
+        out.push_str("# TYPE jiminit_build_info gauge\n");
+        out.push_str(&format!(
+            "jiminit_build_info{{version=\"{}\"}} 1\n",
+            escape_label(env!("CARGO_PKG_VERSION"))
+        ));
+        out.push_str("# HELP jiminit_runlevel_info Runlevel selected at boot or by switch.\n");
+        out.push_str("# TYPE jiminit_runlevel_info gauge\n");
+        out.push_str(&format!(
+            "jiminit_runlevel_info{{runlevel=\"{}\"}} 1\n",
+            escape_label(runlevel)
+        ));
+        out.push_str("# HELP jiminit_service_info Service state, one series per service.\n");
+        out.push_str("# TYPE jiminit_service_info gauge\n");
+        out.push_str("# HELP jiminit_service_restarts_total Restarts since stage 2 started.\n");
+        out.push_str("# TYPE jiminit_service_restarts_total counter\n");
+        out.push_str(
+            "# HELP jiminit_service_cpu_seconds_total CPU time used by the service cgroup.\n",
+        );
+        out.push_str("# TYPE jiminit_service_cpu_seconds_total counter\n");
+        out.push_str("# HELP jiminit_service_memory_bytes memory.current of the service cgroup.\n");
+        out.push_str("# TYPE jiminit_service_memory_bytes gauge\n");
+        out.push_str(
+            "# HELP jiminit_service_memory_peak_bytes memory.peak of the service cgroup.\n",
+        );
+        out.push_str("# TYPE jiminit_service_memory_peak_bytes gauge\n");
+        out.push_str("# HELP jiminit_service_pids Number of tasks in the service cgroup.\n");
+        out.push_str("# TYPE jiminit_service_pids gauge\n");
+        out.push_str(
+            "# HELP jiminit_service_io_read_bytes_total Bytes read, summed over devices.\n",
+        );
+        out.push_str("# TYPE jiminit_service_io_read_bytes_total counter\n");
+        out.push_str(
+            "# HELP jiminit_service_io_write_bytes_total Bytes written, summed over devices.\n",
+        );
+        out.push_str("# TYPE jiminit_service_io_write_bytes_total counter\n");
+
+        let mut order: Vec<usize> = (0..self.services.len()).collect();
+        order.sort_by(|a, b| self.services[*a].name.cmp(&self.services[*b].name));
+        for idx in order {
+            let spec = &self.services[idx];
+            let name = escape_label(&spec.name);
+            let running = self.running.iter().find(|(_, run)| run.idx == idx);
+            let restarts = self.starts[idx].saturating_sub(1);
+            match running {
+                Some((_, run)) => {
+                    out.push_str(&format!(
+                        "jiminit_service_info{{name=\"{name}\",state=\"running\",ready=\"{}\"}} 1\n",
+                        if run.ready { "yes" } else { "no" }
+                    ));
+                    out.push_str(&format!(
+                        "jiminit_service_restarts_total{{name=\"{name}\"}} {restarts}\n"
+                    ));
+                    let stats = crate::cgroup::stats(&spec.name);
+                    if let Some(usec) = stats.cpu_usec {
+                        out.push_str(&format!(
+                            "jiminit_service_cpu_seconds_total{{name=\"{name}\"}} {:.6}\n",
+                            usec as f64 / 1_000_000.0
+                        ));
+                    }
+                    if let Some(bytes) = stats.memory {
+                        out.push_str(&format!(
+                            "jiminit_service_memory_bytes{{name=\"{name}\"}} {bytes}\n"
+                        ));
+                    }
+                    if let Some(bytes) = stats.memory_peak {
+                        out.push_str(&format!(
+                            "jiminit_service_memory_peak_bytes{{name=\"{name}\"}} {bytes}\n"
+                        ));
+                    }
+                    if let Some(pids) = stats.pids {
+                        out.push_str(&format!("jiminit_service_pids{{name=\"{name}\"}} {pids}\n"));
+                    }
+                    if let Some(bytes) = stats.io_read {
+                        out.push_str(&format!(
+                            "jiminit_service_io_read_bytes_total{{name=\"{name}\"}} {bytes}\n"
+                        ));
+                    }
+                    if let Some(bytes) = stats.io_write {
+                        out.push_str(&format!(
+                            "jiminit_service_io_write_bytes_total{{name=\"{name}\"}} {bytes}\n"
+                        ));
+                    }
+                }
+                None => {
+                    out.push_str(&format!(
+                        "jiminit_service_info{{name=\"{name}\",state=\"stopped\",ready=\"no\"}} 1\n"
+                    ));
+                    out.push_str(&format!(
+                        "jiminit_service_restarts_total{{name=\"{name}\"}} {restarts}\n"
+                    ));
+                }
+            }
+        }
+        out
     }
 
     pub fn tick(&mut self) {
@@ -1416,6 +1536,38 @@ fn human_bytes(bytes: u64) -> String {
     format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
 }
 
+/// Like [`human_bytes`] but keeps an explicit `0B` for counters where zero is
+/// meaningful (I/O), instead of the "unavailable" dash.
+fn human_bytes_zero(bytes: u64) -> String {
+    if bytes == 0 {
+        "0B".to_string()
+    } else {
+        human_bytes(bytes)
+    }
+}
+
+fn human_duration(usec: u64) -> String {
+    if usec < 1_000 {
+        format!("{usec}us")
+    } else if usec < 1_000_000 {
+        format!("{:.1}ms", usec as f64 / 1_000.0)
+    } else if usec < 60_000_000 {
+        format!("{:.2}s", usec as f64 / 1_000_000.0)
+    } else if usec < 3_600_000_000 {
+        format!("{:.1}m", usec as f64 / 60_000_000.0)
+    } else {
+        format!("{:.1}h", usec as f64 / 3_600_000_000.0)
+    }
+}
+
+/// Escape a Prometheus label value.
+fn escape_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
 fn child_fail(spec: &ServiceSpec, message: &str) -> ! {
     let line = format!("cannot start service: {message}\n");
     let prefix = format!("svc/{}: ", spec.name);
@@ -1698,5 +1850,23 @@ oneshot = true
         assert_eq!(backoff_delay(3), Duration::from_millis(4_000));
         assert_eq!(backoff_delay(7), Duration::from_millis(60_000));
         assert_eq!(backoff_delay(30), Duration::from_millis(60_000));
+    }
+
+    #[test]
+    fn formats_durations() {
+        assert_eq!(human_duration(0), "0us");
+        assert_eq!(human_duration(1_500), "1.5ms");
+        assert_eq!(human_duration(2_500_000), "2.50s");
+        assert_eq!(human_duration(90_000_000), "1.5m");
+        assert_eq!(human_duration(7_200_000_000), "2.0h");
+    }
+
+    #[test]
+    fn escapes_prometheus_labels() {
+        assert_eq!(escape_label("plain-name"), "plain-name");
+        assert_eq!(escape_label("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+        assert_eq!(human_bytes_zero(0), "0B");
+        assert_eq!(human_bytes_zero(2048), "2.0K");
+        assert_eq!(human_bytes(0), "-");
     }
 }

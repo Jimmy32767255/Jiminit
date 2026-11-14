@@ -117,10 +117,11 @@ name  device  keyfile  options
 
 | 命令 | 行为 |
 | --- | --- |
-| `jiminit --status` | 打印运行级与每个服务一行状态 |
+| `jiminit --status` | 打印运行级与每个服务的状态（pid/重启次数/就绪/内存/CPU/pids/io） |
 | `jiminit --runlevel <name\|1\|3\|5\|0\|6\|poweroff\|halt\|reboot>` | 切换运行级或触发关机/重启 |
 | `jiminit --service <name> <start\|stop\|restart\|reload>` | 控制单个服务 |
 | `jiminit --notify-send <socket> <message>` | 发 sd_notify 数据报 |
+| `jiminit --metrics` | 以 Prometheus 文本格式输出运行级与服务指标 |
 | `jiminit --stage1` / `--stage2` | 强制阶段（调试用） |
 
 客户端连接 `/run/jiminit.sock`，回复以 `error` 开头时退出码为 1。

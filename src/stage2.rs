@@ -620,6 +620,8 @@ fn handle_client(
             reply.push('\n');
         }
         (reply, None)
+    } else if command == "metrics" {
+        (supervisor.metrics(level.name()), None)
     } else if let Some(name) = command.strip_prefix("runlevel ") {
         runlevel_request(cfg, name.trim(), level, supervisor, getties, single_shell)
     } else if let Some(rest) = command.strip_prefix("service ") {
@@ -636,7 +638,7 @@ fn handle_client(
         }
     } else {
         (
-            "error unknown request (try `status`, `runlevel <name>` or `service <name> <action>`)\n"
+            "error unknown request (try `status`, `metrics`, `runlevel <name>` or `service <name> <action>`)\n"
                 .to_string(),
             None,
         )

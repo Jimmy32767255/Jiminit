@@ -91,6 +91,13 @@ wait_for 'ticker running pid=' 20
 wait_for 'cg running pid=.* memory=[0-9]' 20
 printf 'test -s /var/log/jiminit.log && echo LOGFILE-OK\n' >"$FIFO"
 wait_for 'LOGFILE-OK' 20
+printf 'jiminit --status\n' >"$FIFO"
+wait_for 'ticker running pid=.* cpu=' 20
+printf 'jiminit --metrics\n' >"$FIFO"
+wait_for 'jiminit_build_info{version="0.1.0"} 1' 20
+wait_for 'jiminit_runlevel_info{runlevel="multi-user"} 1' 20
+wait_for 'jiminit_service_cpu_seconds_total{name="ticker"}' 20
+wait_for 'jiminit_service_memory_bytes{name="cg"}' 20
 printf 'id\n' >"$FIFO"
 wait_for 'uid=0(root)' 20
 printf 'ls -l /run/jiminit.sock\n' >"$FIFO"
@@ -172,6 +179,8 @@ grep -q 'switching runlevel single -> multi-user' "$LOG" || fail "runlevel switc
 grep -q 'now in runlevel multi-user' "$LOG" || fail "init did not return to multi-user"
 grep -q 'uid=0(root)' "$LOG" || fail "login did not give a root shell"
 grep -q 'srw-------' "$LOG" || fail "control socket is not root-only"
+grep -q 'jiminit_service_info{name="ticker",state="running"' "$LOG" || fail "--metrics did not report a running service"
+grep -q 'jiminit_service_memory_bytes{name="cg"}' "$LOG" || fail "--metrics did not report cgroup memory"
 grep -q 'svc/ticker: tick' "$LOG" || fail "ticker service output was not forwarded"
 grep -q 'svc/failer: restarting' "$LOG" || fail "failed service was not restarted"
 grep -q 'SIGUSR1: soft reboot' "$LOG" || fail "SIGUSR1 did not trigger a soft reboot"

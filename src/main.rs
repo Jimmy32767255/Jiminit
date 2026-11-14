@@ -75,6 +75,7 @@ fn client() -> Option<i32> {
         .as_slice()
     {
         ["--status"] => "status".to_string(),
+        ["--metrics"] => "metrics".to_string(),
         ["--runlevel", level] => format!("runlevel {level}"),
         ["--service", name, action] => format!("service {name} {action}"),
         ["--notify-send", path, message] => return Some(notify_send(path, message)),

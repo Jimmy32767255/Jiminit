@@ -122,6 +122,10 @@ pub fn run() -> Result<()> {
     }
     chdir("/").context("chdir / after switch_root")?;
 
+    // The initramfs udevd (and anything else started by hooks) has no job on
+    // the real root and would keep handling uevents from an unmounted tree.
+    kill_initramfs_helpers();
+
     exec_stage2(&init_path)?;
 
     // exec only returns on failure.
@@ -133,6 +137,18 @@ pub fn run() -> Result<()> {
 /// `pivot_root(".", ".")` stacks the old root on top of the new one at the
 /// current directory; detaching it leaves the new root (including its /usr
 /// mount) in place. This is the pattern recommended by pivot_root(2).
+fn kill_initramfs_helpers() {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    if kill(Pid::from_raw(-1), Signal::SIGTERM).is_err() {
+        return;
+    }
+    crate::info!("terminating leftover initramfs helpers");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let _ = kill(Pid::from_raw(-1), Signal::SIGKILL);
+}
+
 fn pivot_into_new_root() -> Result<()> {
     chdir("/newroot").context("chdir /newroot")?;
     pivot_root(".", ".").context("pivot_root(. , .)")?;

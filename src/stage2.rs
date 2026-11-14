@@ -421,20 +421,6 @@ fn attach_console(path: &str) -> bool {
 }
 
 /// Redirect fds 0..=2 to /dev/null (used for getty, which opens its own tty).
-fn detach_stdio() {
-    let Ok(fd) = open("/dev/null", OFlag::O_RDWR, Mode::empty()) else {
-        return;
-    };
-    let raw = fd.as_raw_fd();
-    for target in [0, 1, 2] {
-        let _ = unsafe { libc::dup2(raw, target) };
-    }
-    if raw > 2 {
-        drop(fd);
-    } else {
-        std::mem::forget(fd);
-    }
-}
 
 /// Give getty a clean stdin but keep its diagnostics on the console, so a
 /// login program that refuses to start is visible in the boot log.
@@ -1081,7 +1067,25 @@ fn live_user_processes() -> usize {
 /// Clear the transient directories and exec a fresh stage 2 in this same PID,
 /// so the whole boot flow (config, services, shell) runs again without asking
 /// the kernel to reboot.
+fn restore_text_console() {
+    const KDSETMODE: libc::c_ulong = 0x4B3A;
+    const KD_TEXT: libc::c_int = 0x00;
+    const KDSKBMODE: libc::c_ulong = 0x4B45;
+    const K_UNICODE: libc::c_int = 0x06;
+
+    let Ok(fd) = open("/dev/console", OFlag::O_RDWR, Mode::empty()) else {
+        return;
+    };
+    let raw = fd.as_raw_fd();
+    let text = unsafe { libc::ioctl(raw, KDSETMODE, KD_TEXT) };
+    if text == 0 {
+        unsafe { libc::ioctl(raw, KDSKBMODE, K_UNICODE) };
+        crate::info!("soft reboot: console restored to text mode");
+    }
+}
+
 fn soft_reboot_exec(cfg: &Config) -> Result<()> {
+    restore_text_console();
     for dir in ["/run", "/tmp"] {
         reset_tmpfs(dir);
     }

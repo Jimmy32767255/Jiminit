@@ -54,7 +54,7 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
 
 ## 项目状态
 
-- 70 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
+- 77 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
   coldplug+真实 fsck 三条冒烟路径各自 PASS。
 - 只在 QEMU x86_64 上验证过；aarch64 只验证了构建路径，未实机测试。
 - 这是个人实验项目，不追求 systemd 兼容，也不适合直接替换生产环境的 init。

@@ -76,18 +76,20 @@ fn block_devices() -> Vec<PathBuf> {
 }
 
 fn find_by_uuid(want: &str) -> Result<PathBuf> {
-    let want = want.trim().to_ascii_lowercase();
-
-    // On a normal system udev maintains these symlinks; use them when present.
-    let by_uuid = PathBuf::from("/dev/disk/by-uuid").join(&want);
-    if by_uuid.exists() {
-        return Ok(by_uuid);
+    let by_uuid_dir = PathBuf::from("/dev/disk/by-uuid");
+    // udev names the link after the blkid output; vfat UUIDs are uppercase
+    // while ext4/btrfs/xfs ones are lowercase, so try both spellings.
+    for candidate in [want.to_string(), want.to_lowercase(), want.to_uppercase()] {
+        let link = by_uuid_dir.join(&candidate);
+        if link.exists() {
+            return Ok(link);
+        }
     }
 
     let mut seen = Vec::new();
     for device in block_devices() {
         if let Some(uuid) = fs_uuid(&device) {
-            if uuid == want {
+            if uuid.eq_ignore_ascii_case(want) {
                 return Ok(device);
             }
             seen.push(format!("{}={uuid}", device.display()));
@@ -150,6 +152,27 @@ pub fn uuid_from_sample(buf: &[u8]) -> Option<String> {
         let uuid = std::str::from_utf8(&raw[..end]).ok()?.trim();
         if !uuid.is_empty() {
             return Some(uuid.to_string());
+        }
+    }
+
+    // FAT12/16/32: boot sector at 0, volume serial shown as XXXX-XXXX.
+    // blkid prints the serial (little-endian u32) as high word then low word,
+    // e.g. `mkfs.vfat -i 0x12345678` -> `1234-5678`. The FAT label sits at
+    // 54 (FAT12/16) or 82 (FAT32); exFAT keeps its serial at offset 100.
+    if buf.len() >= 512 && buf[510] == 0x55 && buf[511] == 0xAA {
+        let bps = u16::from_le_bytes([buf[11], buf[12]]);
+        if (buf[0] == 0xEB || buf[0] == 0xE9) && matches!(bps, 512 | 1024 | 2048 | 4096) {
+            let fat32 = &buf[82..85] == b"FAT";
+            let fat1216 = &buf[54..57] == b"FAT";
+            if fat32 || fat1216 {
+                let offset = if fat32 { 67 } else { 39 };
+                let id = u32::from_le_bytes(buf[offset..offset + 4].try_into().ok()?);
+                return Some(format!("{:04X}-{:04X}", id >> 16, id & 0xFFFF));
+            }
+            if &buf[3..11] == b"EXFAT   " {
+                let id = u32::from_le_bytes(buf[100..104].try_into().ok()?);
+                return Some(format!("{:04X}-{:04X}", id >> 16, id & 0xFFFF));
+            }
         }
     }
 
@@ -359,6 +382,42 @@ mod tests {
             uuid_from_sample(&buf).as_deref(),
             Some("11111111-1111-1111-1111-111111111111")
         );
+    }
+
+    #[test]
+    fn fat32_uuid_detection() {
+        let mut buf = vec![0u8; 512];
+        buf[0] = 0xEB;
+        buf[11..13].copy_from_slice(&512u16.to_le_bytes());
+        buf[82..85].copy_from_slice(b"FAT");
+        buf[67..71].copy_from_slice(&0xABCD1234u32.to_le_bytes());
+        buf[510] = 0x55;
+        buf[511] = 0xAA;
+        assert_eq!(uuid_from_sample(&buf).as_deref(), Some("ABCD-1234"));
+    }
+
+    #[test]
+    fn fat12_uuid_detection() {
+        let mut buf = vec![0u8; 512];
+        buf[0] = 0xE9;
+        buf[11..13].copy_from_slice(&1024u16.to_le_bytes());
+        buf[54..57].copy_from_slice(b"FAT");
+        buf[39..43].copy_from_slice(&0x0000ABCDu32.to_le_bytes());
+        buf[510] = 0x55;
+        buf[511] = 0xAA;
+        assert_eq!(uuid_from_sample(&buf).as_deref(), Some("0000-ABCD"));
+    }
+
+    #[test]
+    fn exfat_uuid_detection() {
+        let mut buf = vec![0u8; 512];
+        buf[0] = 0xEB;
+        buf[3..11].copy_from_slice(b"EXFAT   ");
+        buf[11..13].copy_from_slice(&512u16.to_le_bytes());
+        buf[100..104].copy_from_slice(&0x11223344u32.to_le_bytes());
+        buf[510] = 0x55;
+        buf[511] = 0xAA;
+        assert_eq!(uuid_from_sample(&buf).as_deref(), Some("1122-3344"));
     }
 
     #[test]

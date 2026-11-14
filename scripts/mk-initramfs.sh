@@ -186,6 +186,27 @@ vfat
 EOF
 fi
 
+# FAT support for ESP-style fstab entries (short XXXX-XXXX UUIDs). With the
+# stub modprobe in place, only calls for these modules are delegated to kmod.
+if [ "${FAT:-0}" = "1" ]; then
+    package_kmod
+    package_modules "fat vfat"
+    printf 'vfat\n' >> "$ROOT/etc/modules"
+    if [ "${MODPROBE_STUB:-0}" = "1" ]; then
+        # package_kmod left an absolute symlink; replace it, do not follow it.
+        rm -f "$ROOT/sbin/modprobe"
+        cat > "$ROOT/sbin/modprobe" <<'EOF'
+#!/bin/sh
+case "$1" in
+fat | vfat | msdos | fs-fat | fs-vfat) exec /usr/bin/modprobe "$@" ;;
+esac
+echo "stub-modprobe: $*"
+exit 0
+EOF
+        chmod 755 "$ROOT/sbin/modprobe"
+    fi
+fi
+
 # Real fsck: symlink it as /sbin/fsck so stage 1's plain `fsck -p DEVICE`
 # works without the util-linux dispatcher or an /etc/fstab.
 if [ "${FSCK:-0}" = "1" ]; then

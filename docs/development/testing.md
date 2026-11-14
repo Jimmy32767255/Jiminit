@@ -8,7 +8,7 @@
 cargo test
 ```
 
-当前 70 个用例。覆盖：cmdline、配置严格解析、fstab 解析与挂载点规范化、UUID/GPT/MBR、
+当前 77 个用例。覆盖：cmdline、配置严格解析、fstab 解析与挂载点规范化、UUID/GPT/MBR（含 FAT/exFAT 短 UUID）、
 LUKS 头探测、crypttab、modprobe.d 规则、coldplug alias 收集、运行级、服务解析与
 引号拆分、依赖闭包、退避上限、看门狗时长、cgroup 限制校验、字节格式化、软重启计数。
 
@@ -65,6 +65,8 @@ reboot: Power down
 - `FSCK_STUB=1`：`/sbin/fsck` 是打印参数并返回 0 的脚本；
 - `MODPROBE_STUB=1`：假 `modprobe` + 一份固定的 `/etc/modules`、`/etc/modprobe.d/test.conf`
   （包含 blacklist、alias、options、install）；
+- `FAT=1`：打包真实的 `fat`/`vfat` 模块与 kmod；配合 `MODPROBE_STUB=1` 时，假 modprobe
+  只把 `vfat`/`fat`/`msdos` 交给真 kmod，其余仍走 stub；
 - `MODPROBE_STUB_FAIL=1`（配合上一条）让每次 modprobe 返回 1，用于验证 fail-fast 进
   rescue。手工这样启动时日志会看到
   `Initramfs failed: load kernel module virtio_blk: ...` 和 `starting rescue shell`。

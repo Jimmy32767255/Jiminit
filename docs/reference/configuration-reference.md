@@ -57,7 +57,7 @@
 | 参数 | 说明 |
 | --- | --- |
 | `root=/dev/sda2` | 设备路径 |
-| `root=UUID=<fs-uuid>` | ext4/btrfs/xfs 文件系统 UUID（也识别 LUKS 容器 UUID） |
+| `root=UUID=<fs-uuid>` | ext4/btrfs/xfs UUID、FAT/exFAT 卷序列号（`XXXX-XXXX`，大小写不敏感）、LUKS 容器 UUID |
 | `root=PARTUUID=<guid>` | GPT 分区唯一 GUID，或 MBR `diskid-01`…`-04` |
 | `rootfstype=` | 省略时先让内核探测，再依次试 ext4/xfs/btrfs/vfat |
 | `rootflags=` | 原样传给 mount |

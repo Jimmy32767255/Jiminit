@@ -90,6 +90,15 @@ cat > "$ROOT/etc/fstab" <<'EOF'
 tmpfs /data tmpfs nosuid,nodev,nofail 0 0
 EOF
 
+# Optional ESP-style vfat disk, to exercise short (XXXX-XXXX) filesystem UUIDs.
+if [ "${ESP:-0}" = "1" ]; then
+    mkdir -p "$ROOT/boot"
+    truncate -s 16M "$OUT/esp.img"
+    # The volume id is what blkid reports as UUID 1234-5678.
+    mkfs.vfat -F 32 -i 0x12345678 -n ESP "$OUT/esp.img" >/dev/null 2>&1
+    echo 'UUID=1234-5678 /boot vfat ro,nofail 0 0' >> "$ROOT/etc/fstab"
+fi
+
 cat > "$ROOT/etc/jiminit/services.d/ticker.toml" <<'EOF'
 # Example service: prints one line per second. Exercised by the smoke test.
 exec = "/bin/sh"

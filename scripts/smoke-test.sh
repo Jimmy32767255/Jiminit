@@ -65,8 +65,8 @@ login() {
 }
 
 ./scripts/build.sh >/dev/null
-FSCK_STUB=1 MODPROBE_STUB=1 ./scripts/mk-initramfs.sh >/dev/null
-./scripts/mk-rootfs.sh >/dev/null
+FSCK_STUB=1 MODPROBE_STUB=1 FAT=1 ./scripts/mk-initramfs.sh >/dev/null
+ESP=1 ./scripts/mk-rootfs.sh >/dev/null
 
 rm -f "$FIFO" "$LOG"
 : >"$LOG"
@@ -79,6 +79,7 @@ qemu-system-x86_64 \
     -kernel "${KERNEL:-/boot/vmlinuz-linux}" \
     -initrd out/initramfs.cpio.gz \
     -drive file=out/rootfs.ext4,format=raw,if=virtio \
+    -drive file=out/esp.img,format=raw,if=virtio \
     -append "console=ttyS0 rdinit=/init root=/dev/vda rootfstype=ext4 rw quiet" \
     -nographic -no-reboot <"$FIFO" >"$LOG" 2>&1 &
 qpid=$!
@@ -168,6 +169,7 @@ grep -q 'stub-install: baz' "$LOG" || fail "modprobe.d install command was not r
 grep -q 'stub-fsck: -p /dev/vda' "$LOG" || fail "fsck was not run before mounting the root"
 grep -q 'fsck: exited with 0' "$LOG" || fail "fsck result was not checked"
 grep -q 'fstab: mounted tmpfs on /newroot/data' "$LOG" || fail "fstab entry was not mounted"
+grep -q 'fstab: mounted /dev/vdb on /newroot/boot' "$LOG" || fail "a vfat short UUID was not resolved"
 grep -q 'stage2: starting as pid 1' "$LOG" || fail "stage2 did not start as PID 1"
 grep -q 'hostname set to jiminit-qemu' "$LOG" || fail "config file was not applied"
 grep -q 'started getty on /dev/ttyS0' "$LOG" || fail "getty did not start on the serial console"

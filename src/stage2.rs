@@ -31,13 +31,37 @@ const LOOP_TIMEOUT_MS: u16 = 100;
 /// Where `jiminit --status` / `jiminit --runlevel` find the control socket.
 pub const CONTROL_PATH: &str = "/run/jiminit.sock";
 
-/// Delay before respawning a getty after the previous one exited.
-const GETTY_RESPAWN_DELAY: Duration = Duration::from_millis(500);
+/// Delay before respawning a crashed getty; doubles up to the cap. Sessions
+/// that stayed up longer than the stable window start over from the base.
+const GETTY_RESPAWN_BASE: Duration = Duration::from_millis(500);
+const GETTY_RESPAWN_MAX: Duration = Duration::from_secs(30);
+const SESSION_STABLE_UPTIME: Duration = Duration::from_secs(10);
 
 struct Getty {
     pid: Pid,
     tty: String,
     serial: bool,
+    started: Instant,
+    failures: u32,
+}
+
+/// A getty that exited and is waiting for its respawn deadline.
+struct PendingGetty {
+    tty: String,
+    serial: bool,
+    due: Instant,
+    failures: u32,
+}
+
+/// The single-user root shell, waiting for its respawn deadline.
+struct PendingShell {
+    due: Instant,
+    failures: u32,
+}
+
+fn respawn_delay(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(16);
+    (GETTY_RESPAWN_BASE * 2u32.pow(shift)).min(GETTY_RESPAWN_MAX)
 }
 
 pub fn run() -> Result<()> {
@@ -70,12 +94,20 @@ pub fn run() -> Result<()> {
     supervisor.start_members();
 
     let mut getties: Vec<Getty> = Vec::new();
+    let mut pending_getties: Vec<PendingGetty> = Vec::new();
     let mut single_shell: Option<Pid> = None;
+    let mut pending_shell: Option<PendingShell> = None;
+    let mut single_failures: u32 = 0;
+    let mut shell_started = Instant::now();
+    let mut shell_pid = single_shell;
     if level == Level::Single {
         single_shell = Some(spawn_shell(&cfg)?);
+        shell_pid = single_shell;
+        shell_started = Instant::now();
     } else {
         start_getties(&cfg, &mut getties);
     }
+    let mut previous_level = level;
 
     loop {
         // Wake on a signal, on service output, on a control request, or after
@@ -150,6 +182,17 @@ pub fn run() -> Result<()> {
             }
         }
 
+        if level != previous_level {
+            previous_level = level;
+            // Restarts scheduled for the old sessions no longer apply.
+            pending_getties.clear();
+            pending_shell = None;
+        }
+        if single_shell != shell_pid {
+            shell_pid = single_shell;
+            shell_started = Instant::now();
+        }
+
         // Reap on every wakeup rather than only on SIGCHLD, so a coalesced
         // signal can never leave zombies behind.
         let (exited, _) = reap_all();
@@ -165,32 +208,59 @@ pub fn run() -> Result<()> {
 
             if let Some(position) = getties.iter().position(|getty| getty.pid == pid) {
                 let getty = getties.remove(position);
-                crate::warn!(
-                    "getty on {} (pid {pid}) exited: {}",
-                    getty.tty,
-                    describe(status)
-                );
+                let failures = if getty.started.elapsed() >= SESSION_STABLE_UPTIME {
+                    1
+                } else {
+                    getty.failures.saturating_add(1)
+                };
                 if level != Level::Single {
-                    std::thread::sleep(GETTY_RESPAWN_DELAY);
-                    if level != Level::Single {
-                        spawn_getty_for(&cfg, &getty.tty, getty.serial, &mut getties);
-                    }
+                    let delay = respawn_delay(failures);
+                    crate::warn!(
+                        "getty on {} (pid {pid}) exited: {}; respawning in {}ms",
+                        getty.tty,
+                        describe(status),
+                        delay.as_millis()
+                    );
+                    pending_getties.push(PendingGetty {
+                        tty: getty.tty,
+                        serial: getty.serial,
+                        due: Instant::now() + delay,
+                        failures,
+                    });
+                } else {
+                    crate::warn!(
+                        "getty on {} (pid {pid}) exited: {}",
+                        getty.tty,
+                        describe(status)
+                    );
                 }
                 continue;
             }
 
             if Some(pid) == single_shell {
-                crate::warn!("root shell {pid} exited");
                 single_shell = None;
                 if level != Level::Single {
                     // Killed by a runlevel switch; nothing to respawn.
+                    crate::warn!("root shell {pid} exited");
                 } else if cfg.respawn {
-                    std::thread::sleep(Duration::from_millis(500));
-                    match spawn_shell(&cfg) {
-                        Ok(pid) => single_shell = Some(pid),
-                        Err(e) => crate::err!("cannot respawn the root shell: {e:#}"),
-                    }
+                    let failures = if shell_started.elapsed() >= SESSION_STABLE_UPTIME {
+                        1
+                    } else {
+                        single_failures.saturating_add(1)
+                    };
+                    single_failures = failures;
+                    let delay = respawn_delay(failures);
+                    crate::warn!(
+                        "root shell {pid} exited: {}; respawning in {}ms",
+                        describe(status),
+                        delay.as_millis()
+                    );
+                    pending_shell = Some(PendingShell {
+                        due: Instant::now() + delay,
+                        failures,
+                    });
                 } else {
+                    crate::warn!("root shell {pid} exited: {}", describe(status));
                     crate::info!("respawn is disabled; shutting down");
                     return shutdown(
                         &cfg,
@@ -207,6 +277,49 @@ pub fn run() -> Result<()> {
         }
 
         supervisor.tick();
+
+        // Respawn crashed sessions once their deadline passed. This runs from
+        // the main loop so PID 1 never sleeps and keeps handling signals,
+        // service output and control requests meanwhile.
+        let now = Instant::now();
+        let mut index = 0;
+        while index < pending_getties.len() {
+            if pending_getties[index].due > now {
+                index += 1;
+                continue;
+            }
+            let pending = pending_getties.remove(index);
+            if level != Level::Single && !getties.iter().any(|getty| getty.tty == pending.tty) {
+                spawn_getty_for(
+                    &cfg,
+                    &pending.tty,
+                    pending.serial,
+                    pending.failures,
+                    &mut getties,
+                );
+            }
+        }
+        if pending_shell
+            .as_ref()
+            .is_some_and(|pending| pending.due <= now)
+        {
+            let pending = pending_shell.take().expect("checked above");
+            match spawn_shell(&cfg) {
+                Ok(pid) => {
+                    single_shell = Some(pid);
+                    shell_pid = single_shell;
+                    shell_started = Instant::now();
+                }
+                Err(e) => {
+                    crate::err!("cannot respawn the root shell: {e:#}");
+                    let failures = pending.failures.saturating_add(1);
+                    pending_shell = Some(PendingShell {
+                        due: Instant::now() + respawn_delay(failures),
+                        failures,
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -357,11 +470,11 @@ fn start_getties(cfg: &Config, getties: &mut Vec<Getty>) {
             crate::info!("getty: {tty} does not exist; skipping");
             continue;
         }
-        spawn_getty_for(cfg, &tty, serial, getties);
+        spawn_getty_for(cfg, &tty, serial, 0, getties);
     }
 }
 
-fn spawn_getty_for(cfg: &Config, tty: &str, serial: bool, getties: &mut Vec<Getty>) {
+fn spawn_getty_for(cfg: &Config, tty: &str, serial: bool, failures: u32, getties: &mut Vec<Getty>) {
     match spawn_getty(cfg, tty, serial) {
         Ok(pid) => {
             crate::info!("started getty on {tty} (pid {pid})");
@@ -369,6 +482,8 @@ fn spawn_getty_for(cfg: &Config, tty: &str, serial: bool, getties: &mut Vec<Gett
                 pid,
                 tty: tty.to_string(),
                 serial,
+                started: Instant::now(),
+                failures,
             });
         }
         Err(e) => crate::err!("cannot start getty on {tty}: {e:#}"),
@@ -1018,7 +1133,17 @@ fn soft_reboot_env(count: u32) -> Vec<CString> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_soft_reboot_count;
+    use super::{parse_soft_reboot_count, respawn_delay};
+    use std::time::Duration;
+
+    #[test]
+    fn session_respawn_backoff_grows_and_caps() {
+        assert_eq!(respawn_delay(1), Duration::from_millis(500));
+        assert_eq!(respawn_delay(2), Duration::from_millis(1_000));
+        assert_eq!(respawn_delay(3), Duration::from_millis(2_000));
+        assert_eq!(respawn_delay(7), Duration::from_secs(30));
+        assert_eq!(respawn_delay(40), Duration::from_secs(30));
+    }
 
     #[test]
     fn soft_reboot_count_defaults_to_one() {

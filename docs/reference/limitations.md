@@ -38,7 +38,6 @@
   （测试镜像是 busybox）。替换成 util-linux login/agetty 时应同样可用，但未实测。
 - 只有三个固定运行级，没有 SysV 的任意 `rcN.d` 脚本目录，也没有 inittab。
 - VT 切换只能靠内核快捷键，jiminit 不处理 `chvt`/键盘。
-- getty 反复启动失败时固定每 500ms 重拉一次，没有退避，会持续刷日志。
 - 控制 socket 一次只处理一个连接，客户端慢会阻塞主循环最多约 1 秒。
 
 ## 服务

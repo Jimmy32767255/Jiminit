@@ -104,7 +104,13 @@ wait_for 'uid=0(root)' 20
 printf 'ls -l /run/jiminit.sock\n' >"$FIFO"
 wait_for 'srw-------' 20
 
-# 2. Switch to single: the login session is stopped and a root shell takes
+# 2. Log out: getty must come back through the non-blocking respawn queue.
+printf 'exit\n' >"$FIFO"
+wait_for 'respawning in 500ms' 20
+wait_count 'login:' 2 30
+login 2
+
+# 3. Switch to single: the login session is stopped and a root shell takes
 #    over the console. The client runs in that dying session, so verify the
 #    switch through the kernel log and the new shell.
 printf 'jiminit --runlevel single &\n' >"$FIFO"
@@ -113,13 +119,13 @@ sleep 1
 printf 'echo SINGLE-SHELL-OK\n' >"$FIFO"
 wait_for 'SINGLE-SHELL-OK' 20
 
-# 3. Switch back to multi-user: getty must come back.
+# 4. Switch back to multi-user: getty must come back.
 printf 'jiminit --runlevel multi-user &\n' >"$FIFO"
 wait_for 'now in runlevel multi-user' 20
-wait_count 'login:' 2 30
+wait_count 'login:' 3 30
 
-# 4. Log in again and exercise per-service control over the socket.
-login 2
+# 5. Log in again and exercise per-service control over the socket.
+login 3
 printf 'jiminit --service after stop\n' >"$FIFO"
 wait_for 'ok after stopping' 15
 wait_for 'svc/after: stopping on request' 15
@@ -134,14 +140,14 @@ printf 'jiminit --service parent stop\n' >"$FIFO"
 wait_for 'ok parent stopping' 15
 wait_for 'stopping because dependency' 15
 
-# 5. Soft reboot: every session is stopped, stage 2 re-execs and getty comes
+# 6. Soft reboot: every session is stopped, stage 2 re-execs and getty comes
 #    back.
 printf 'kill -USR1 1\n' >"$FIFO"
 wait_count 'running stage2 again' 1 30
-wait_count 'login:' 3 40
+wait_count 'login:' 4 40
 
-# 6. Log in on the new stage 2 and power off.
-login 3
+# 7. Log in on the new stage 2 and power off.
+login 4
 printf 'kill -TERM 1\n' >"$FIFO"
 
 waited=0

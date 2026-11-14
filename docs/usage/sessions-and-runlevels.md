@@ -10,7 +10,9 @@ jiminit 不做认证。它只为每个终端 fork 一个 getty，getty 再 exec 
 - `ttys`：`/dev/tty1`–`/dev/tty6`，各一个 getty，波特率 `getty_baud`（38400）；
 - `serial_ttys`：`/dev/ttyS0`，设备存在才起，波特率 `serial_getty_baud`（115200）。
 
-getty 退出（比如登录 shell 退出）后 500ms 重新拉起；没有退避，反复失败会持续刷日志。
+getty 退出（比如登录 shell 退出）后由主循环按 deadline 重新拉起，PID 1 不会 sleep：
+首次 500ms，连续崩溃按 500ms→1s→2s… 退避，上限 30s；稳定运行 ≥10s 后退避复位。
+single 级的 root shell 使用同一套重拉与退避逻辑。
 PID 1 自己不占控制终端，getty/shell 各自 `setsid` + `TIOCSCTTY`。
 
 ## 运行级

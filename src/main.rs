@@ -41,7 +41,7 @@ enum Stage {
 }
 
 fn main() {
-    if let Some(code) = client() {
+    if let Some(code) = client().or_else(check) {
         std::process::exit(code);
     }
 
@@ -82,6 +82,47 @@ fn client() -> Option<i32> {
         _ => return None,
     };
     Some(run_client(&request))
+}
+
+/// Validate the configuration and every service file without starting anything.
+fn check() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args != ["--check"] {
+        return None;
+    }
+    log::init();
+    match check_config() {
+        Ok(()) => Some(0),
+        Err(e) => {
+            crate::err!("configuration check failed: {e:#}");
+            Some(1)
+        }
+    }
+}
+
+fn check_config() -> anyhow::Result<()> {
+    use anyhow::Context;
+    let cfg = crate::config::load(std::path::Path::new(crate::config::DEFAULT_PATH))
+        .context("load configuration")?;
+    let services = crate::service::load_dir(std::path::Path::new(&cfg.services_dir))
+        .context("load service definitions")?;
+    let (order, cyclic) = crate::service::startup_order(&services);
+    if !cyclic.is_empty() {
+        anyhow::bail!("dependency cycle involving {}", cyclic.join(", "));
+    }
+    let names: Vec<&str> = order
+        .iter()
+        .map(|index| services[*index].name.as_str())
+        .collect();
+    crate::info!(
+        "configuration ok: runlevel {}, getty {}, log {}, {} service(s): {}",
+        cfg.default_runlevel,
+        cfg.getty,
+        cfg.log_file,
+        services.len(),
+        names.join(" -> ")
+    );
+    Ok(())
 }
 
 fn run_client(request: &str) -> i32 {

@@ -40,6 +40,9 @@ pub struct Config {
     pub getty_baud: String,
     /// Baud rate passed to getty for serial terminals.
     pub serial_getty_baud: String,
+    /// Pass `-L <baud> <tty>` (busybox getty) instead of `-L <tty> <baud>`
+    /// (util-linux agetty).
+    pub getty_baud_first: bool,
     /// Virtual terminals that get a getty.
     pub ttys: Vec<String>,
     /// Serial terminals that get a getty when the device exists.
@@ -63,6 +66,7 @@ impl Default for Config {
             getty: "/sbin/getty".to_string(),
             getty_baud: "38400".to_string(),
             serial_getty_baud: "115200".to_string(),
+            getty_baud_first: true,
             ttys: (1..=6).map(|n| format!("/dev/tty{n}")).collect(),
             serial_ttys: vec!["/dev/ttyS0".to_string()],
         }

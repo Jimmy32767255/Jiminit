@@ -15,15 +15,17 @@ pub fn run() -> Result<()> {
 
     crate::mount::mount_pseudo_fs();
 
+    let cmdline = crate::cmdline::Cmdline::read().context("read /proc/cmdline")?;
+
     crate::modules::load(
         Path::new(crate::modules::MODULES_FILE),
         Path::new(crate::modules::MODPROBE_DIR),
     )?;
     crate::coldplug::load();
 
-    crate::luks::unlock_all(Path::new(crate::luks::CRYPTTAB))?;
+    let crypttab = cmdline.value("crypttab").unwrap_or(crate::luks::CRYPTTAB);
+    crate::luks::unlock_all(Path::new(crypttab))?;
 
-    let cmdline = crate::cmdline::Cmdline::read().context("read /proc/cmdline")?;
     activate_lvm(&cmdline)?;
 
     let root_spec = cmdline

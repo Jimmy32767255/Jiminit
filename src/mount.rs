@@ -50,16 +50,52 @@ pub fn mount_pseudo_fs() {
     ];
 
     for (source, target, fstype, flags, data) in entries {
-        match mount(Some(source), target, Some(fstype), flags, data) {
-            Ok(()) => {}
-            Err(Errno::EBUSY) if is_mountpoint(target) => {
-                crate::info!("{target} is already a mount point; leaving it alone");
-            }
-            Err(Errno::EBUSY) => {
-                crate::warn!("mount {fstype} on {target}: target is busy but is not a mount point");
-            }
-            Err(e) => crate::warn!("mount {fstype} on {target} failed: {e}"),
+        mount_or_report(source, target, fstype, flags, data);
+    }
+
+    // Userspace needs these to exist as real filesystems: PTYs and shared
+    // memory for desktop stacks, /run for sockets and state, /tmp writable
+    // even when the root filesystem is read-only.
+    let _ = std::fs::create_dir_all("/dev/pts");
+    let _ = std::fs::create_dir_all("/dev/shm");
+    let _ = std::fs::create_dir_all("/run");
+    let _ = std::fs::create_dir_all("/tmp");
+
+    mount_or_report(
+        "devpts",
+        "/dev/pts",
+        "devpts",
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
+        Some("gid=5,mode=620"),
+    );
+    for target in ["/dev/shm", "/tmp"] {
+        mount_or_report(
+            "tmpfs",
+            target,
+            "tmpfs",
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+            Some("mode=1777"),
+        );
+    }
+    mount_or_report(
+        "tmpfs",
+        "/run",
+        "tmpfs",
+        MsFlags::MS_NOSUID,
+        Some("mode=0755"),
+    );
+}
+
+fn mount_or_report(source: &str, target: &str, fstype: &str, flags: MsFlags, data: Option<&str>) {
+    match mount(Some(source), target, Some(fstype), flags, data) {
+        Ok(()) => {}
+        Err(Errno::EBUSY) if is_mountpoint(target) => {
+            crate::info!("{target} is already a mount point; leaving it alone");
         }
+        Err(Errno::EBUSY) => {
+            crate::warn!("mount {fstype} on {target}: target is busy but is not a mount point");
+        }
+        Err(e) => crate::warn!("mount {fstype} on {target} failed: {e}"),
     }
 }
 

@@ -91,7 +91,7 @@ fn unlock(program: &str, entry: &Entry) -> Result<()> {
 fn add_options(command: &mut Command, entry: &Entry) {
     for option in &entry.options {
         match option.as_str() {
-            "luks" | "none" => {}
+            "luks" | "none" | "noearly" | "nofail" | "noauto" => {}
             "discard" | "allow-discards" => {
                 command.arg("--allow-discards");
             }

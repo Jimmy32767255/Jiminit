@@ -315,7 +315,7 @@ fn split_command(text: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
-fn load_dir(dir: &Path) -> Result<Vec<ServiceSpec>> {
+pub(crate) fn load_dir(dir: &Path) -> Result<Vec<ServiceSpec>> {
     let entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => {
             let mut paths = Vec::new();
@@ -352,7 +352,7 @@ fn load_dir(dir: &Path) -> Result<Vec<ServiceSpec>> {
 /// Dependency order, computed in waves: every service whose dependencies are
 /// already launched can start together. Returns `(order, cyclic)` where
 /// `cyclic` lists services skipped because of a dependency cycle.
-fn startup_order(services: &[ServiceSpec]) -> (Vec<usize>, Vec<String>) {
+pub(crate) fn startup_order(services: &[ServiceSpec]) -> (Vec<usize>, Vec<String>) {
     let mut remaining: BTreeSet<usize> = (0..services.len()).collect();
     let mut done: BTreeSet<String> = BTreeSet::new();
     let mut order = Vec::new();

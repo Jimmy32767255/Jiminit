@@ -32,6 +32,7 @@ default_runlevel   = "multi-user"
 getty              = "/sbin/getty"
 getty_baud         = "38400"
 serial_getty_baud  = "115200"
+getty_baud_first   = true
 ttys               = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
 serial_ttys        = ["/dev/ttyS0"]
 ```
@@ -52,6 +53,8 @@ serial_ttys        = ["/dev/ttyS0"]
 - `ttys` / `serial_ttys`：要起 getty 的终端；不存在的设备会被静默跳过（serial
   默认就只探测 `/dev/ttyS0`）。删掉某个 tty 即可关掉那一路登录。
 - `getty_baud` / `serial_getty_baud`：传给 getty 的波特率。
+- `getty_baud_first`：参数顺序。busybox getty 用 `-L <baud> <tty>`（默认 `true`），
+  util-linux agetty 用 `-L <tty> <baud>`（设 `false`）。
 - `respawn`：single 级 root shell 退出后是否重新拉起。
 - `default_runlevel`：启动进入的级别，接受 `single`/`multi-user`/`graphical`
   和 `1`/`3`/`5`。

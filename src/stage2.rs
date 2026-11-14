@@ -508,8 +508,13 @@ fn child_getty(cfg: &Config, tty: &str, serial: bool) -> ! {
         cfg.getty_baud.as_str()
     };
 
+    let order: [&str; 4] = if cfg.getty_baud_first {
+        ["getty", "-L", baud, tty]
+    } else {
+        ["getty", "-L", tty, baud]
+    };
     let mut strings = Vec::with_capacity(4);
-    for value in ["getty", "-L", baud, tty] {
+    for value in order {
         match CString::new(value) {
             Ok(value) => strings.push(value),
             Err(_) => {

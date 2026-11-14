@@ -50,6 +50,8 @@ pub struct Config {
     pub ttys: Vec<String>,
     /// Serial terminals that get a getty when the device exists.
     pub serial_ttys: Vec<String>,
+    /// Terminal colors: `auto`, `always` or `never`.
+    pub color: String,
 }
 
 impl Default for Config {
@@ -73,6 +75,23 @@ impl Default for Config {
             getty_tty_basename: false,
             ttys: (1..=6).map(|n| format!("/dev/tty{n}")).collect(),
             serial_ttys: vec!["/dev/ttyS0".to_string()],
+            color: "auto".to_string(),
+        }
+    }
+}
+
+impl Config {
+    /// Parsed [`crate::log::Color`]; an invalid value falls back to `auto`.
+    pub fn color_choice(&self) -> crate::log::Color {
+        match crate::log::Color::parse(&self.color) {
+            Some(choice) => choice,
+            None => {
+                crate::warn!(
+                    "color = {:?} is not auto/always/never; using auto",
+                    self.color
+                );
+                crate::log::Color::Auto
+            }
         }
     }
 }
@@ -125,6 +144,7 @@ mod tests {
         assert_eq!(cfg.getty, "/sbin/getty");
         assert_eq!(cfg.ttys.len(), 6);
         assert_eq!(cfg.serial_ttys, ["/dev/ttyS0"]);
+        assert_eq!(cfg.color, "auto");
     }
 
     #[test]
@@ -156,6 +176,16 @@ mod tests {
         assert_eq!(cfg.console, "/dev/console");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn color_choice_falls_back_to_auto() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.color_choice(), crate::log::Color::Auto);
+        cfg.color = "always".into();
+        assert_eq!(cfg.color_choice(), crate::log::Color::Always);
+        cfg.color = "sometimes".into();
+        assert_eq!(cfg.color_choice(), crate::log::Color::Auto);
     }
 
     #[test]

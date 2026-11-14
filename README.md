@@ -18,6 +18,8 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
   `jiminit --metrics` 输出 Prometheus 文本。
 - **会话**：为多个 tty 拉起 getty，认证交给外部 `login`；`single`/`multi-user`/
   `graphical` 运行级可运行时切换；`SIGUSR1` 软重启（exec 自己）。
+- **CLI 体验**：日志带相对时间与 `[  OK  ]`/`[ WARN ]`/`[ FAIL ]` 标签（`color`
+  可配），`jiminit --check` 打印缩进依赖树，`jiminit --graph` 输出 DOT 依赖图。
 - **可交付**：静态构建脚本、四种 QEMU 冒烟测试、install.sh、PKGBUILD、
   mkinitcpio hook、aarch64 构建路径。
 
@@ -35,6 +37,13 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
 
 看到 `jiminit-qemu login:` 后用测试账号 `root` / `jiminit` 登录。退出 QEMU：
 `Ctrl-a` 再 `x`。
+
+配置自检（不启动任何服务）：
+
+```sh
+jiminit --check   # 依赖树 + 启动顺序
+jiminit --graph   # Graphviz DOT
+```
 
 自动验证：
 

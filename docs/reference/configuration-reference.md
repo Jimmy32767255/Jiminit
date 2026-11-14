@@ -13,6 +13,7 @@
 | `shutdown_timeout_ms` | int | `3000` | 关机 SIGTERM 宽限期 |
 | `init_path` | string | `"/sbin/jiminit"` | stage2 路径（stage1 读真实根配置后 exec） |
 | `log_file` | string | `"/var/log/jiminit.log"` | 追加日志，`""` 关闭，1 MiB 滚动 |
+| `color` | string | `"auto"` | `auto` 只在终端上色，`always`/`never` 强制 |
 | `services_dir` | string | `"/etc/jiminit/services.d"` | 服务定义目录 |
 | `cgroup` | bool | `true` | 每服务独立 cgroup v2 子组 |
 | `ready_timeout_ms` | int | `5000` | notify 服务等 `READY=1` 的上限 |
@@ -124,9 +125,31 @@ name  device  keyfile  options
 | `jiminit --service <name> <start\|stop\|restart\|reload>` | 控制单个服务 |
 | `jiminit --notify-send <socket> <message>` | 发 sd_notify 数据报 |
 | `jiminit --metrics` | 以 Prometheus 文本格式输出运行级与服务指标 |
+| `jiminit --check` | 校验配置与服务依赖，打印缩进依赖树与启动顺序 |
+| `jiminit --graph` | 以 Graphviz DOT 输出服务依赖图（不连接运行中的 init） |
 | `jiminit --stage1` / `--stage2` | 强制阶段（调试用） |
 
 客户端连接 `/run/jiminit.sock`，回复以 `error` 开头时退出码为 1。
+
+## 日志格式
+
+每条日志固定为两列：
+
+```text
+[   12.345] [  OK  ] pivot_root: switched to the new root
+[   12.350] [ INFO ] stage2: starting as pid 1
+[   13.002] [ WARN ] svc/failer: 2 consecutive failures; restarting in 4000ms
+[   14.100] [ FAIL ] svc/hog: 5 consecutive failures; giving up
+```
+
+- 第一列是相对 jiminit 启动的秒数；软重启会重新计时。
+- 标签为 `[  OK  ]` / `[ INFO ]` / `[ WARN ]` / `[ FAIL ]`，写入 `/dev/kmsg`
+  与日志文件时保持纯文本。
+- `color = "auto"` 时只有 stderr/stdout 是终端才输出 ANSI 颜色；`--status`
+  的 running/stopped/failed 也会按同样规则着色。
+
+日志同时写 stderr、`/dev/kmsg` 和 `log_file`；`/dev/kmsg` 由内核加时间戳，
+因此不再重复第一列。
 
 ## 环境变量
 

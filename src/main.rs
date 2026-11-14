@@ -41,7 +41,7 @@ enum Stage {
 }
 
 fn main() {
-    if let Some(code) = client().or_else(check) {
+    if let Some(code) = client().or_else(check).or_else(graph) {
         std::process::exit(code);
     }
 
@@ -81,6 +81,10 @@ fn client() -> Option<i32> {
         ["--notify-send", path, message] => return Some(notify_send(path, message)),
         _ => return None,
     };
+    log::init();
+    if let Ok(cfg) = config::load(std::path::Path::new(config::DEFAULT_PATH)) {
+        log::set_color(cfg.color_choice());
+    }
     Some(run_client(&request))
 }
 
@@ -104,24 +108,63 @@ fn check_config() -> anyhow::Result<()> {
     use anyhow::Context;
     let cfg = crate::config::load(std::path::Path::new(crate::config::DEFAULT_PATH))
         .context("load configuration")?;
+    crate::log::set_color(cfg.color_choice());
     let services = crate::service::load_dir(std::path::Path::new(&cfg.services_dir))
         .context("load service definitions")?;
     let (order, cyclic) = crate::service::startup_order(&services);
     if !cyclic.is_empty() {
         anyhow::bail!("dependency cycle involving {}", cyclic.join(", "));
     }
+    println!(
+        "{} configuration ok: runlevel {}, getty {}",
+        crate::log::ok_tag(),
+        cfg.default_runlevel,
+        cfg.getty
+    );
+    println!("         log: {}", cfg.log_file);
+    if services.is_empty() {
+        println!("         services: none");
+        return Ok(());
+    }
+    println!("         services ({}):", services.len());
+    for line in crate::service::tree_lines(&services) {
+        println!("           {line}");
+    }
     let names: Vec<&str> = order
         .iter()
         .map(|index| services[*index].name.as_str())
         .collect();
-    crate::info!(
-        "configuration ok: runlevel {}, getty {}, log {}, {} service(s): {}",
-        cfg.default_runlevel,
-        cfg.getty,
-        cfg.log_file,
-        services.len(),
-        names.join(" -> ")
-    );
+    println!("         start order: {}", names.join(" -> "));
+    Ok(())
+}
+
+/// Print the service dependency graph as Graphviz DOT.
+fn graph() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args != ["--graph"] {
+        return None;
+    }
+    log::init();
+    match graph_config() {
+        Ok(()) => Some(0),
+        Err(e) => {
+            eprintln!("jiminit: cannot build dependency graph: {e:#}");
+            Some(1)
+        }
+    }
+}
+
+fn graph_config() -> anyhow::Result<()> {
+    use anyhow::Context;
+    let cfg = crate::config::load(std::path::Path::new(crate::config::DEFAULT_PATH))
+        .context("load configuration")?;
+    let services = crate::service::load_dir(std::path::Path::new(&cfg.services_dir))
+        .context("load service definitions")?;
+    let (_, cyclic) = crate::service::startup_order(&services);
+    if !cyclic.is_empty() {
+        anyhow::bail!("dependency cycle involving {}", cyclic.join(", "));
+    }
+    print!("{}", crate::service::dot_graph(&services));
     Ok(())
 }
 
@@ -148,12 +191,42 @@ fn run_client(request: &str) -> i32 {
     }
     // The session may be hung up while the reply is on the way (a runlevel
     // switch stops the session that asked for it), so ignore write errors.
-    let _ = std::io::stdout().write_all(reply.as_bytes());
+    let _ = std::io::stdout().write_all(colorize_reply(&reply).as_bytes());
     if reply.starts_with("error") {
         1
     } else {
         0
     }
+}
+
+/// Give `--status` a little color: green running, dim stopped, red failed.
+fn colorize_reply(reply: &str) -> String {
+    if !log::stdout_colors() {
+        return reply.to_string();
+    }
+    let mut out = String::with_capacity(reply.len() + 32);
+    for line in reply.lines() {
+        let code = if line.contains(" running ") {
+            Some("1;32")
+        } else if line.contains(" failed") || line.starts_with("error") {
+            Some("1;31")
+        } else if line.contains(" stopped ") {
+            Some("2")
+        } else {
+            None
+        };
+        match code {
+            Some(code) => out.push_str(&format!("\x1b[{code}m{line}\x1b[0m\n")),
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    if !reply.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 /// Send one sd_notify datagram, e.g. `jiminit --notify-send "$NOTIFY_SOCKET" READY=1`.

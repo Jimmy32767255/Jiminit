@@ -101,13 +101,13 @@ pub fn run() -> Result<()> {
     // every other fstab mount with it. If the kernel refuses (e.g. shared
     // mount propagation), fall back to the classic MS_MOVE switch_root.
     match pivot_into_new_root() {
-        Ok(()) => crate::info!("pivot_root: switched to the new root"),
+        Ok(()) => crate::ok!("pivot_root: switched to the new root"),
         Err(e) => {
             crate::warn!("pivot_root failed ({e:#}); falling back to MS_MOVE + chroot");
             chdir("/newroot").context("chdir /newroot")?;
             match crate::mount::switch_root_move() {
                 Ok(()) => {
-                    crate::info!("moved new root onto /");
+                    crate::ok!("moved new root onto /");
                     // Re-anchor the process root on the moved mount, like
                     // busybox switch_root; otherwise the old rootfs stays
                     // current and exec of /sbin/jiminit gets ENOENT.

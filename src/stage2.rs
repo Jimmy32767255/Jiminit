@@ -849,7 +849,7 @@ fn switch_level(
     }
 
     *level = target;
-    crate::info!("now in runlevel {target}");
+    crate::ok!("now in runlevel {target}");
 }
 
 fn stop_getties(getties: &mut Vec<Getty>) -> Vec<Pid> {

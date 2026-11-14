@@ -381,6 +381,54 @@ pub(crate) fn startup_order(services: &[ServiceSpec]) -> (Vec<usize>, Vec<String
     (order, cyclic)
 }
 
+/// Indented dependency overview for `--check`: one line per service, deeper
+/// dependencies indented by two spaces, with the direct dependencies noted.
+pub(crate) fn tree_lines(services: &[ServiceSpec]) -> Vec<String> {
+    let (order, _) = startup_order(services);
+    let mut depth = vec![0usize; services.len()];
+    for idx in order {
+        depth[idx] = services[idx]
+            .depends_on
+            .iter()
+            .filter_map(|name| services.iter().position(|spec| &spec.name == name))
+            .map(|dep| depth[dep] + 1)
+            .max()
+            .unwrap_or(0)
+            .min(services.len());
+    }
+    let mut rows: Vec<(usize, &str)> = (0..services.len())
+        .map(|idx| (depth[idx], services[idx].name.as_str()))
+        .collect();
+    rows.sort();
+    rows.into_iter()
+        .map(|(indent, name)| {
+            let spec = services.iter().find(|spec| spec.name == name).unwrap();
+            let mut line = format!("{}{}", "  ".repeat(indent), name);
+            if !spec.depends_on.is_empty() {
+                line.push_str(&format!("  (after {})", spec.depends_on.join(", ")));
+            }
+            line
+        })
+        .collect()
+}
+
+/// Graphviz DOT description of the dependency graph for `--graph`.
+pub(crate) fn dot_graph(services: &[ServiceSpec]) -> String {
+    let mut out = String::from("digraph jiminit {\n    rankdir=LR;\n    node [shape=box];\n");
+    for spec in services {
+        out.push_str(&format!("    \"{}\";\n", spec.name));
+    }
+    for spec in services {
+        for dep in &spec.depends_on {
+            if services.iter().any(|candidate| &candidate.name == dep) {
+                out.push_str(&format!("    \"{dep}\" -> \"{}\";\n", spec.name));
+            }
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
 /// Services that should run at `level`: tagged services plus their
 /// dependencies, transitively.
 fn members_of(services: &[ServiceSpec], level: Level) -> BTreeSet<usize> {
@@ -1003,7 +1051,7 @@ impl Supervisor {
                 }
             }
             if newly {
-                crate::info!("svc/{name}: ready");
+                crate::ok!("svc/{name}: ready");
             }
         }
         for (name, value) in status {
@@ -1175,7 +1223,7 @@ impl Supervisor {
                         watchdog_deadline: spec.watchdog.map(|d| Instant::now() + d),
                     },
                 );
-                crate::info!("svc/{}: started (pid {child})", spec.name);
+                crate::ok!("svc/{}: started (pid {child})", spec.name);
                 if let Some(path) = &notify_path {
                     if spec.notify {
                         crate::info!("svc/{}: waiting for READY=1 on {path}", spec.name);
@@ -1266,7 +1314,7 @@ impl Supervisor {
 
         failures += 1;
         if failures >= MAX_CONSECUTIVE_FAILURES {
-            crate::warn!("svc/{name}: {failures} consecutive failures; giving up");
+            crate::err!("svc/{name}: {failures} consecutive failures; giving up");
             self.mark_failed(idx);
             return true;
         }
@@ -1868,5 +1916,21 @@ oneshot = true
         assert_eq!(human_bytes_zero(0), "0B");
         assert_eq!(human_bytes_zero(2048), "2.0K");
         assert_eq!(human_bytes(0), "-");
+    }
+    #[test]
+    fn dependency_tree_is_indented() {
+        let services = vec![spec("a", &[]), spec("b", &["a"]), spec("c", &["a"])];
+        assert_eq!(
+            tree_lines(&services),
+            vec!["a", "  b  (after a)", "  c  (after a)"]
+        );
+    }
+
+    #[test]
+    fn dot_graph_lists_edges() {
+        let services = vec![spec("a", &[]), spec("b", &["a"])];
+        let dot = dot_graph(&services);
+        assert!(dot.starts_with("digraph jiminit {"));
+        assert!(dot.contains("\"a\" -> \"b\";"));
     }
 }

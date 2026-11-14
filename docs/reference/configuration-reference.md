@@ -21,6 +21,7 @@
 | `getty_baud` | string | `"38400"` | VT getty 波特率 |
 | `serial_getty_baud` | string | `"115200"` | 串口 getty 波特率 |
 | `getty_baud_first` | bool | `true` | `true` 传 `-L <baud> <tty>`（busybox getty）；`false` 传 `-L <tty> <baud>`（util-linux agetty） |
+| `getty_tty_basename` | bool | `false` | `true` 时把 `/dev/tty1` 传成 `tty1`；util-linux agetty 会自己加 `/dev/` 前缀，必须开启 |
 | `ttys` | array | `tty1`…`tty6` | 要起 getty 的 VT |
 | `serial_ttys` | array | `["/dev/ttyS0"]` | 要起 getty 的串口（不存在则跳过） |
 

@@ -436,6 +436,27 @@ fn detach_stdio() {
     }
 }
 
+/// Give getty a clean stdin but keep its diagnostics on the console, so a
+/// login program that refuses to start is visible in the boot log.
+fn detach_getty_stdio() {
+    let Ok(null) = open("/dev/null", OFlag::O_RDONLY, Mode::empty()) else {
+        return;
+    };
+    let _ = unsafe { libc::dup2(null.as_raw_fd(), 0) };
+
+    match open("/dev/console", OFlag::O_WRONLY, Mode::empty()) {
+        Ok(console) => {
+            let raw = console.as_raw_fd();
+            let _ = unsafe { libc::dup2(raw, 1) };
+            let _ = unsafe { libc::dup2(raw, 2) };
+        }
+        Err(_) => {
+            let _ = unsafe { libc::dup2(null.as_raw_fd(), 1) };
+            let _ = unsafe { libc::dup2(null.as_raw_fd(), 2) };
+        }
+    }
+}
+
 struct Signals {
     set: SigSet,
 }
@@ -500,7 +521,7 @@ fn spawn_getty(cfg: &Config, tty: &str, serial: bool) -> Result<Pid> {
 fn child_getty(cfg: &Config, tty: &str, serial: bool) -> ! {
     clear_signal_mask();
     let _ = setsid();
-    detach_stdio();
+    detach_getty_stdio();
 
     let baud = if serial {
         cfg.serial_getty_baud.as_str()
@@ -508,6 +529,11 @@ fn child_getty(cfg: &Config, tty: &str, serial: bool) -> ! {
         cfg.getty_baud.as_str()
     };
 
+    let tty = if cfg.getty_tty_basename {
+        tty.strip_prefix("/dev/").unwrap_or(tty)
+    } else {
+        tty
+    };
     let order: [&str; 4] = if cfg.getty_baud_first {
         ["getty", "-L", baud, tty]
     } else {

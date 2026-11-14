@@ -33,6 +33,7 @@ getty              = "/sbin/getty"
 getty_baud         = "38400"
 serial_getty_baud  = "115200"
 getty_baud_first   = true
+getty_tty_basename = false
 ttys               = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
 serial_ttys        = ["/dev/ttyS0"]
 ```
@@ -55,6 +56,19 @@ serial_ttys        = ["/dev/ttyS0"]
 - `getty_baud` / `serial_getty_baud`：传给 getty 的波特率。
 - `getty_baud_first`：参数顺序。busybox getty 用 `-L <baud> <tty>`（默认 `true`），
   util-linux agetty 用 `-L <tty> <baud>`（设 `false`）。
+- `getty_tty_basename`：util-linux agetty 会自行在参数前加 `/dev/`，
+  所以它需要 `tty1` 而不是 `/dev/tty1`（设 `true`）。
+
+用 util-linux agetty 时两个选项都要改：
+
+```toml
+getty = "/sbin/agetty"
+getty_baud_first = false
+getty_tty_basename = true
+```
+
+否则 agetty 会尝试打开 `/dev//dev/tty1`（或把波特率当成设备名），
+以状态 1 立即退出。
 - `respawn`：single 级 root shell 退出后是否重新拉起。
 - `default_runlevel`：启动进入的级别，接受 `single`/`multi-user`/`graphical`
   和 `1`/`3`/`5`。

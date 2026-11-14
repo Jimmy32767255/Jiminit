@@ -43,6 +43,9 @@ pub struct Config {
     /// Pass `-L <baud> <tty>` (busybox getty) instead of `-L <tty> <baud>`
     /// (util-linux agetty).
     pub getty_baud_first: bool,
+    /// Strip the leading /dev/ when passing the tty name. util-linux agetty
+    /// prepends /dev/ itself, so it needs "tty1" instead of "/dev/tty1".
+    pub getty_tty_basename: bool,
     /// Virtual terminals that get a getty.
     pub ttys: Vec<String>,
     /// Serial terminals that get a getty when the device exists.
@@ -67,6 +70,7 @@ impl Default for Config {
             getty_baud: "38400".to_string(),
             serial_getty_baud: "115200".to_string(),
             getty_baud_first: true,
+            getty_tty_basename: false,
             ttys: (1..=6).map(|n| format!("/dev/tty{n}")).collect(),
             serial_ttys: vec!["/dev/ttyS0".to_string()],
         }

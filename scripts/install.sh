@@ -35,6 +35,8 @@ DOCDIR=$DESTDIR/usr/share/doc/jiminit
 install -d "$BINDIR" "$CONFDIR/jiminit/services.d" "$DOCDIR"
 install -m755 "$BIN" "$BINDIR/jiminit"
 install -m644 README.md "$DOCDIR/README.md"
+install -d "$DOCDIR/docs"
+cp -R docs/. "$DOCDIR/docs/"
 
 if [ -e "$CONFDIR/jiminit.toml" ]; then
     echo "keeping existing $CONFDIR/jiminit.toml"

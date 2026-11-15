@@ -29,7 +29,7 @@ pub fn parse(text: &str) -> Vec<Entry> {
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 2 {
-            crate::warn!(
+            crate::error!(
                 "crypttab: line {} has fewer than 2 fields; skipping",
                 number + 1
             );

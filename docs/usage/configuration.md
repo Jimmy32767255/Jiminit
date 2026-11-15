@@ -27,6 +27,7 @@ cgroup        = true
 ready_timeout_ms = 5000
 
 log_file      = "/var/log/jiminit.log"
+log_level     = "info"
 
 default_runlevel   = "multi-user"
 getty              = "/sbin/getty"
@@ -72,6 +73,14 @@ getty_tty_basename = true
 - `respawn`：single 级 root shell 退出后是否重新拉起。
 - `default_runlevel`：启动进入的级别，接受 `single`/`multi-user`/`graphical`
   和 `1`/`3`/`5`；可被内核参数 `jiminit.runlevel=` 覆盖（见下节）。
+
+### 日志
+
+- `log_level`：最低输出级别，`trace`/`debug`/`info`/`mesg`/`warn`/`error`/`crit`，
+  默认 `info`。低于阈值的记录连 `/dev/kmsg` 和日志文件也不写。
+  `[ SUCC ]` 按 info 计，`[ FAIL ]` 按 error 计；`[ WAIT ]` 也按 info 计。
+- `log_file`：日志文件路径，`""` 关闭；超过 1 MiB 轮转为 `.1`。
+- 级别标签的含义见[配置速查的日志格式](../reference/configuration-reference.md#日志格式)。
 
 ### 服务
 

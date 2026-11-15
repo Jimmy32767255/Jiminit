@@ -72,6 +72,7 @@ pub fn run() -> Result<()> {
     let cfg = crate::config::load(Path::new(crate::config::DEFAULT_PATH))
         .context("load configuration")?;
     crate::log::init_file(&cfg.log_file);
+    crate::log::set_level(cfg.level_choice());
     crate::info!("stage2: starting as pid {}", nix::unistd::getpid());
     if !cfg.log_file.is_empty() {
         crate::info!("logging to {}", cfg.log_file);
@@ -164,9 +165,9 @@ pub fn run() -> Result<()> {
                 }
                 libc::SIGCHLD => {}
                 libc::SIGQUIT | libc::SIGHUP => {
-                    crate::info!("ignoring signal {}", info.ssi_signo)
+                    crate::debug!("ignoring signal {}", info.ssi_signo)
                 }
-                other => crate::info!("unexpected signal {other}"),
+                other => crate::warn!("unexpected signal {other}"),
             }
         }
 
@@ -199,7 +200,7 @@ pub fn run() -> Result<()> {
         let (exited, _) = reap_all();
         for status in &exited {
             let Some(pid) = status.pid() else {
-                crate::info!("reaped: {}", describe(status));
+                crate::trace!("reaped: {}", describe(status));
                 continue;
             };
 
@@ -242,7 +243,7 @@ pub fn run() -> Result<()> {
                 single_shell = None;
                 if level != Level::Single {
                     // Killed by a runlevel switch; nothing to respawn.
-                    crate::warn!("root shell {pid} exited");
+                    crate::debug!("root shell {pid} exited");
                 } else if cfg.respawn {
                     let failures = if shell_started.elapsed() >= SESSION_STABLE_UPTIME {
                         1
@@ -262,7 +263,7 @@ pub fn run() -> Result<()> {
                     });
                 } else {
                     crate::warn!("root shell {pid} exited: {}", describe(status));
-                    crate::info!("respawn is disabled; shutting down");
+                    crate::mesg!("respawn is disabled; shutting down");
                     return shutdown(
                         &cfg,
                         &mut supervisor,
@@ -274,7 +275,7 @@ pub fn run() -> Result<()> {
                 continue;
             }
 
-            crate::info!("reaped: {}", describe(status));
+            crate::trace!("reaped: {}", describe(status));
         }
 
         supervisor.tick();
@@ -312,7 +313,7 @@ pub fn run() -> Result<()> {
                     shell_started = Instant::now();
                 }
                 Err(e) => {
-                    crate::err!("cannot respawn the root shell: {e:#}");
+                    crate::error!("cannot respawn the root shell: {e:#}");
                     let failures = pending.failures.saturating_add(1);
                     pending_shell = Some(PendingShell {
                         due: Instant::now() + respawn_delay(failures),
@@ -357,7 +358,7 @@ fn choose_level(requested: Option<&str>, configured: &str) -> Level {
     match Level::parse(configured) {
         Some(level) => level,
         None => {
-            crate::warn!(
+            crate::error!(
                 "unknown default_runlevel `{configured}`; using {}",
                 Level::DEFAULT
             );
@@ -371,13 +372,14 @@ fn choose_level(requested: Option<&str>, configured: &str) -> Level {
 pub fn rescue() -> ! {
     let cfg = crate::config::load_or_default(Path::new(crate::config::DEFAULT_PATH));
     crate::log::init_file(&cfg.log_file);
+    crate::log::set_level(cfg.level_choice());
     let shell = if Path::new(&cfg.shell).exists() {
         cfg.shell.clone()
     } else {
         "/bin/sh".to_string()
     };
 
-    crate::err!("starting rescue shell ({shell})");
+    crate::crit!("starting rescue shell ({shell})");
 
     setup_console(&cfg.console);
     loop {
@@ -388,7 +390,7 @@ pub fn rescue() -> ! {
             }
             Ok(ForkResult::Child) => child_shell(&cfg.console, &shell),
             Err(e) => {
-                crate::warn!("fork failed: {e}");
+                crate::error!("fork failed: {e}");
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
@@ -406,7 +408,7 @@ fn open_console(path: &str) -> Option<std::os::fd::OwnedFd> {
     match open(path, OFlag::O_RDWR | OFlag::O_NOCTTY, Mode::empty()) {
         Ok(fd) => Some(fd),
         Err(e) => {
-            crate::warn!("cannot open console {path}: {e}");
+            crate::error!("cannot open console {path}: {e}");
             None
         }
     }
@@ -522,7 +524,7 @@ fn spawn_getty_for(cfg: &Config, tty: &str, serial: bool, failures: u32, getties
                 failures,
             });
         }
-        Err(e) => crate::err!("cannot start getty on {tty}: {e:#}"),
+        Err(e) => crate::fail!("cannot start getty on {tty}: {e:#}"),
     }
 }
 
@@ -559,7 +561,7 @@ fn child_getty(cfg: &Config, tty: &str, serial: bool) -> ! {
         match CString::new(value) {
             Ok(value) => strings.push(value),
             Err(_) => {
-                crate::err!("getty argument contains a NUL byte");
+                crate::fail!("getty argument contains a NUL byte");
                 unsafe { libc::_exit(127) }
             }
         }
@@ -567,14 +569,14 @@ fn child_getty(cfg: &Config, tty: &str, serial: bool) -> ! {
     let path = match CString::new(cfg.getty.as_str()) {
         Ok(path) => path,
         Err(_) => {
-            crate::err!("getty path contains a NUL byte");
+            crate::fail!("getty path contains a NUL byte");
             unsafe { libc::_exit(127) }
         }
     };
     let env = inherited_env();
 
     let error = nix::unistd::execve(&path, &strings, &env);
-    crate::err!("cannot exec {} on {tty}: {error:?}", cfg.getty);
+    crate::fail!("cannot exec {} on {tty}: {error:?}", cfg.getty);
     unsafe { libc::_exit(127) }
 }
 
@@ -603,14 +605,14 @@ fn child_shell(console: &str, shell: &str) -> ! {
     let argv0 = match CString::new(format!("-{name}")) {
         Ok(argv0) => argv0,
         Err(_) => {
-            crate::err!("shell name contains a NUL byte");
+            crate::crit!("shell name contains a NUL byte");
             unsafe { libc::_exit(127) }
         }
     };
     let path = match CString::new(shell) {
         Ok(path) => path,
         Err(_) => {
-            crate::err!("shell path contains a NUL byte");
+            crate::crit!("shell path contains a NUL byte");
             unsafe { libc::_exit(127) }
         }
     };
@@ -618,7 +620,7 @@ fn child_shell(console: &str, shell: &str) -> ! {
     let args = [argv0];
 
     let error = nix::unistd::execve(&path, &args, &env);
-    crate::err!("cannot exec {shell}: {error:?}");
+    crate::crit!("cannot exec {shell}: {error:?}");
     unsafe { libc::_exit(127) }
 }
 
@@ -681,7 +683,7 @@ fn reap_all() -> (Vec<WaitStatus>, bool) {
             Ok(status) => reaped.push(status),
             Err(Errno::ECHILD) => return (reaped, true),
             Err(e) => {
-                crate::warn!("waitpid failed: {e}");
+                crate::error!("waitpid failed: {e}");
                 return (reaped, false);
             }
         }
@@ -715,7 +717,7 @@ fn control_listener() -> Option<UnixListener> {
             if let Err(e) =
                 std::fs::set_permissions(CONTROL_PATH, std::fs::Permissions::from_mode(0o600))
             {
-                crate::warn!("cannot restrict {CONTROL_PATH} to root: {e}");
+                crate::error!("cannot restrict {CONTROL_PATH} to root: {e}");
             }
             match listener.set_nonblocking(true) {
                 Ok(()) => {
@@ -723,13 +725,13 @@ fn control_listener() -> Option<UnixListener> {
                     Some(listener)
                 }
                 Err(e) => {
-                    crate::warn!("cannot make {CONTROL_PATH} nonblocking: {e}");
+                    crate::error!("cannot make {CONTROL_PATH} nonblocking: {e}");
                     None
                 }
             }
         }
         Err(e) => {
-            crate::warn!("cannot create {CONTROL_PATH}: {e}");
+            crate::error!("cannot create {CONTROL_PATH}: {e}");
             None
         }
     }
@@ -748,7 +750,7 @@ fn handle_control(
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == ErrorKind::WouldBlock => return None,
             Err(e) => {
-                crate::warn!("accept on {CONTROL_PATH}: {e}");
+                crate::error!("accept on {CONTROL_PATH}: {e}");
                 return None;
             }
         };
@@ -945,7 +947,7 @@ fn switch_level(
         if single_shell.is_none() {
             match spawn_shell(cfg) {
                 Ok(pid) => *single_shell = Some(pid),
-                Err(e) => crate::err!("cannot start the single-user shell: {e:#}"),
+                Err(e) => crate::error!("cannot start the single-user shell: {e:#}"),
             }
         }
     } else {
@@ -953,7 +955,7 @@ fn switch_level(
     }
 
     *level = target;
-    crate::ok!("now in runlevel {target}");
+    crate::succ!("now in runlevel {target}");
 }
 
 fn stop_getties(getties: &mut Vec<Getty>) -> Vec<Pid> {
@@ -992,8 +994,10 @@ fn pid_alive(pid: Pid) -> bool {
 /// supervisor, sessions through the kernel's liveness check), killing the
 /// stragglers after `timeout`.
 fn wait_for(supervisor: &mut Supervisor, pids: &[Pid], timeout: Duration) {
+    let mut wait = crate::log::Wait::start(format!("stopping {} process(es)", pids.len()), timeout);
     let deadline = Instant::now() + timeout;
     loop {
+        wait.tick();
         reap_for(supervisor);
 
         let services_left = supervisor.any_running(pids);
@@ -1039,7 +1043,7 @@ fn reap_for(supervisor: &mut Supervisor) {
     for status in &exited {
         match status.pid() {
             Some(pid) if supervisor.handle_exit(pid, status) => {}
-            _ => crate::info!("reaped: {}", describe(status)),
+            _ => crate::trace!("reaped: {}", describe(status)),
         }
     }
     supervisor.drain_logs();
@@ -1095,8 +1099,13 @@ fn stop_display_holders(supervisor: &mut Supervisor) {
     for pid in &holders {
         signal_tree(*pid, Signal::SIGTERM);
     }
+    let mut wait = crate::log::Wait::start(
+        "waiting for the display to be released",
+        Duration::from_secs(2),
+    );
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
+        wait.tick();
         reap_for(supervisor);
         if !display_holders().iter().any(|pid| pid_alive(*pid)) {
             return;
@@ -1166,16 +1175,21 @@ fn shutdown(
 
     // Phase 1: give everything shutdown_timeout_ms to exit after SIGTERM.
     // Phase 2: SIGKILL whatever is left, then wait a little longer.
+    let mut wait = crate::log::Wait::start(
+        "stopping sessions and services",
+        Duration::from_millis(cfg.shutdown_timeout_ms),
+    );
     let deadline = Instant::now() + Duration::from_millis(cfg.shutdown_timeout_ms);
     let mut hard_deadline: Option<Instant> = None;
     loop {
+        wait.tick();
         let (exited, all_gone) = reap_all();
         for status in &exited {
             match status.pid() {
                 Some(pid) if !supervisor.handle_exit(pid, status) => {
-                    crate::info!("reaped: {}", describe(status))
+                    crate::trace!("reaped: {}", describe(status))
                 }
-                None => crate::info!("reaped: {}", describe(status)),
+                None => crate::trace!("reaped: {}", describe(status)),
                 Some(_) => {}
             }
         }
@@ -1195,7 +1209,7 @@ fn shutdown(
                 hard_deadline = Some(now + Duration::from_secs(2));
             }
             Some(hard) if now >= hard => {
-                crate::warn!("{others} process(es) survived SIGKILL; continuing anyway");
+                crate::error!("{others} process(es) survived SIGKILL; continuing anyway");
                 break;
             }
             _ => {}
@@ -1203,6 +1217,7 @@ fn shutdown(
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    drop(wait);
     crate::info!("flushing filesystems");
     nix::unistd::sync();
 
@@ -1228,10 +1243,10 @@ fn shutdown(
     crate::info!("requesting {how:?}");
     match nix::sys::reboot::reboot(how) {
         Ok(never) => match never {},
-        Err(e) => crate::warn!("reboot syscall failed: {e}"),
+        Err(e) => crate::crit!("reboot syscall failed: {e}"),
     }
 
-    crate::warn!("system did not power off; idling");
+    crate::crit!("system did not power off; idling");
     loop {
         std::thread::sleep(Duration::from_secs(60));
     }
@@ -1315,7 +1330,7 @@ fn soft_reboot_exec(cfg: &Config) -> Result<()> {
     match exec_self(&exe, count) {
         Ok(never) => match never {},
         Err(e) => {
-            crate::err!("soft reboot failed: {e:#}; falling back to the rescue shell");
+            crate::crit!("soft reboot failed: {e:#}; falling back to the rescue shell");
             rescue();
         }
     }
@@ -1331,7 +1346,7 @@ fn reset_tmpfs(dir: &str) {
         Some("mode=1777"),
     ) {
         Ok(()) => crate::info!("soft reboot: fresh tmpfs on {dir}"),
-        Err(e) => crate::warn!("cannot mount a fresh tmpfs on {dir}: {e}"),
+        Err(e) => crate::error!("cannot mount a fresh tmpfs on {dir}: {e}"),
     }
 }
 

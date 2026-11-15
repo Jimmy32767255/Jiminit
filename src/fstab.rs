@@ -132,7 +132,7 @@ pub fn parse(text: &str) -> Vec<Entry> {
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 3 {
-            crate::warn!(
+            crate::error!(
                 "fstab: line {} has fewer than 3 fields; skipping",
                 number + 1
             );
@@ -157,7 +157,7 @@ pub fn parse(text: &str) -> Vec<Entry> {
             continue;
         }
         let Some(mountpoint) = normalize_mountpoint(&raw_mountpoint) else {
-            crate::warn!(
+            crate::error!(
                 "fstab: {} is not a usable absolute mountpoint; skipping",
                 fields[1]
             );

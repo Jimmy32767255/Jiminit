@@ -20,7 +20,7 @@ pub fn init(enabled: bool) -> bool {
     *ENABLED.get_or_init(|| match setup() {
         Ok(()) => true,
         Err(e) => {
-            crate::warn!("cgroup: disabled: {e:#}");
+            crate::error!("cgroup: disabled: {e:#}");
             false
         }
     })
@@ -80,7 +80,7 @@ pub fn attach(name: &str, pid: u32) {
     };
     let path = dir.join("cgroup.procs");
     if let Err(e) = std::fs::write(&path, format!("{pid}\n")) {
-        crate::warn!("cgroup: cannot attach pid {pid} to {}: {e}", dir.display());
+        crate::error!("cgroup: cannot attach pid {pid} to {}: {e}", dir.display());
     }
 }
 
@@ -109,7 +109,7 @@ pub fn enable_controllers(controllers: &[&str]) -> Result<()> {
         .collect::<Vec<_>>();
     for controller in controllers {
         if !available.iter().any(|c| c == controller) {
-            crate::warn!("cgroup: controller `{controller}` is not available");
+            crate::error!("cgroup: controller `{controller}` is not available");
             continue;
         }
         enable_one(root, controller)?;
@@ -155,7 +155,7 @@ pub fn configure(
 fn write_limit(dir: &Path, file: &str, value: &str) {
     let path = dir.join(file);
     if let Err(e) = std::fs::write(&path, format!("{value}\n")) {
-        crate::warn!("cgroup: cannot write {}: {e}", path.display());
+        crate::error!("cgroup: cannot write {}: {e}", path.display());
     }
 }
 

@@ -52,7 +52,7 @@ pub fn run() -> Result<()> {
         flags |= MsFlags::MS_RDONLY;
     }
     mount_root(&device, "/newroot", fstype, flags, data)?;
-    crate::info!("mounted {} on /newroot", device.display());
+    crate::succ!("mounted {} on /newroot", device.display());
 
     mount_fstab("/newroot")?;
     if crate::mount::is_mountpoint("/newroot/usr") {
@@ -84,7 +84,7 @@ pub fn run() -> Result<()> {
     for sub in ["/dev", "/proc", "/sys"] {
         let target = format!("/newroot{sub}");
         if let Err(e) = std::fs::create_dir_all(&target) {
-            crate::warn!("create {target} failed: {e}");
+            crate::error!("create {target} failed: {e}");
         }
         match crate::mount::mount_move(sub, &target) {
             Ok(()) => crate::info!("moved {sub} to {target}"),
@@ -101,13 +101,13 @@ pub fn run() -> Result<()> {
     // every other fstab mount with it. If the kernel refuses (e.g. shared
     // mount propagation), fall back to the classic MS_MOVE switch_root.
     match pivot_into_new_root() {
-        Ok(()) => crate::ok!("pivot_root: switched to the new root"),
+        Ok(()) => crate::succ!("pivot_root: switched to the new root"),
         Err(e) => {
             crate::warn!("pivot_root failed ({e:#}); falling back to MS_MOVE + chroot");
             chdir("/newroot").context("chdir /newroot")?;
             match crate::mount::switch_root_move() {
                 Ok(()) => {
-                    crate::ok!("moved new root onto /");
+                    crate::succ!("moved new root onto /");
                     // Re-anchor the process root on the moved mount, like
                     // busybox switch_root; otherwise the old rootfs stays
                     // current and exec of /sbin/jiminit gets ENOENT.
@@ -185,7 +185,7 @@ fn activate_lvm(cmdline: &crate::cmdline::Cmdline) -> Result<()> {
     if !status.success() {
         bail!("lvm vgchange -ay failed: {status}");
     }
-    crate::info!("lvm: volume groups activated");
+    crate::succ!("lvm: volume groups activated");
     Ok(())
 }
 
@@ -206,7 +206,7 @@ fn fsck_root(device: &Path, cmdline: &crate::cmdline::Cmdline) -> Result<()> {
         return Ok(());
     }
     let Some(program) = find_fsck() else {
-        crate::info!("fsck: no fsck program in the initramfs; skipping");
+        crate::warn!("fsck: no fsck program in the initramfs; skipping");
         return Ok(());
     };
 
@@ -233,11 +233,11 @@ fn assess_fsck(code: i32) -> Result<()> {
     match code {
         0 => Ok(()),
         1 => {
-            crate::info!("fsck: filesystem errors corrected");
+            crate::warn!("fsck: filesystem errors corrected");
             Ok(())
         }
         2 => {
-            crate::warn!("fsck: filesystem errors corrected, a reboot is recommended");
+            crate::mesg!("fsck: filesystem errors corrected, a reboot is recommended");
             Ok(())
         }
         4 => bail!("fsck: filesystem errors were left uncorrected"),
@@ -260,7 +260,7 @@ fn mount_fstab(root: &str) -> Result<()> {
     for entry in entries {
         let target = format!("{root}{}", entry.mountpoint);
         if !Path::new(&target).exists() {
-            crate::warn!(
+            crate::error!(
                 "fstab: mountpoint {target} does not exist; skipping {}",
                 entry.device
             );

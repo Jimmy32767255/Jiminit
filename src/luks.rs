@@ -71,7 +71,7 @@ fn unlock(program: &str, entry: &Entry) -> Result<()> {
                 if !Path::new(&mapper).exists() {
                     bail!("cryptsetup reported success but {mapper} does not exist");
                 }
-                crate::info!("crypttab: {} is ready", entry.name);
+                crate::succ!("crypttab: {} is ready", entry.name);
                 return Ok(());
             }
             Ok(status) => last_error = format!("cryptsetup exited with {status}"),

@@ -13,6 +13,7 @@
 | `shutdown_timeout_ms` | int | `3000` | 关机 SIGTERM 宽限期 |
 | `init_path` | string | `"/sbin/jiminit"` | stage2 路径（stage1 读真实根配置后 exec） |
 | `log_file` | string | `"/var/log/jiminit.log"` | 追加日志，`""` 关闭，1 MiB 滚动 |
+| `log_level` | string | `"info"` | 最低输出级别：`trace`/`debug`/`info`/`mesg`/`warn`/`error`/`crit`；`[ SUCC ]`/`[ WAIT ]` 按 info 计，`[ FAIL ]` 按 error 计 |
 | `color` | string | `"auto"` | `auto` 只在终端上色，`always`/`never` 强制 |
 | `services_dir` | string | `"/etc/jiminit/services.d"` | 服务定义目录 |
 | `cgroup` | bool | `true` | 每服务独立 cgroup v2 子组 |
@@ -154,18 +155,39 @@ name  device  keyfile  options
 
 ## 日志格式
 
-每条日志固定为两列：
+每条日志固定为两列：相对时间与 6 字符宽的级别标签。
 
 ```text
-[   12.345] [  OK  ] pivot_root: switched to the new root
+[   12.345] [ SUCC ] pivot_root: switched to the new root
 [   12.350] [ INFO ] stage2: starting as pid 1
-[   13.002] [ WARN ] svc/failer: 2 consecutive failures; restarting in 4000ms
+[   12.402] [ WAIT ] - 0s/3s stopping sessions and services /
+[   13.002] [ MESG ] fsck: filesystem errors corrected, a reboot is recommended
+[   13.480] [ WARN ] svc/failer: 2 consecutive failures; restarting in 4000ms
 [   14.100] [ FAIL ] svc/hog: 5 consecutive failures; giving up
 ```
 
+| 标签 | 含义 | 颜色 | 级别 | 用途 |
+| --- | --- | --- | --- | --- |
+| `[ SUCC ]` | 成功 | 亮绿 | info | 一个操作成功 |
+| `[ INFO ]` | 信息 | 白 | info | 一般日志（“我做了什么”） |
+| `[ MESG ]` | 消息 | 浅蓝 | mesg | 需要用户注意/确认（“请你做什么”） |
+| `[DE BUG]` | 调试 | 深蓝 | debug | 排查线索，默认不输出 |
+| `[TRACE ]` | 追踪 | 深灰 | trace | 任意事件，默认不输出 |
+| `[ WARN ]` | 警告 | 亮黄 | warn | 确定不影响运行的轻微问题（如重复参数说明了用了哪个） |
+| `[ERR OR]` | 错误 | 暗红 | error | 非预期情况，可能有回退（如配置缺失后用了默认值） |
+| `[ FAIL ]` | 失败 | 亮红 | error | 某个操作失败（由 error 引起） |
+| `[CRITIC]` | 关键 | 红底黑字 | crit | 系统无法继续正常启动/运行 |
+| `[ WAIT ]` | 等待 | 青 | info | 有上限的等待，见下 |
+
 - 第一列是相对 jiminit 启动的秒数；软重启会重新计时。
-- 标签为 `[  OK  ]` / `[ INFO ]` / `[ WARN ]` / `[ FAIL ]`，写入 `/dev/kmsg`
-  与日志文件时保持纯文本。
+- `log_level` 过滤低于阈值的记录；`[ SUCC ]` 按 info、`[ FAIL ]` 按 error 计算。
+  默认 `info`，所以 `[DE BUG]`/`[TRACE ]` 只有显式调低阈值才出现。
+- `[ WAIT ]` 只对超过 300ms 的等待出现（20ms 的 modprobe 不会刷屏）。终端上原地
+  刷新 `- 0s/3s <标签> <动画>`（经典 `-\|/` 循环），结束擦除该行；非终端
+  （`/dev/kmsg`、日志文件、重定向）写一行静态记录，结果由随后的成功/警告日志给出。
+  目前覆盖：关机、运行级切换、显示进程清理、模块/命令执行、根设备重试；
+  服务等待 `READY=1` 打一行静态 `[ WAIT ]`。
+- 写入 `/dev/kmsg` 与日志文件时保持纯文本（无颜色、无动画）。
 - `color = "auto"` 时只有 stderr/stdout 是终端才输出 ANSI 颜色；`status`
   的 running/stopped/failed 也会按同样规则着色。
 

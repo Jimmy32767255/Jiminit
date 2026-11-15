@@ -47,14 +47,22 @@ pub fn resolve(spec: &str) -> Result<PathBuf> {
 
 /// Resolve, retrying while devices are still being created.
 pub fn resolve_with_retry(spec: &str, attempts: usize, interval: Duration) -> Result<PathBuf> {
+    let attempts = attempts.max(1);
+    let window = interval.saturating_mul(attempts as u32);
+    // Short retries are not worth a progress line; a missing root device is.
+    let mut wait = (window >= Duration::from_secs(1))
+        .then(|| crate::log::Wait::start(format!("waiting for {spec}"), window));
     let mut last_err = None;
-    for attempt in 0..attempts.max(1) {
+    for attempt in 0..attempts {
         match resolve(spec) {
             Ok(path) if path.exists() => return Ok(path),
             Ok(path) => last_err = Some(anyhow::anyhow!("{} does not exist", path.display())),
             Err(e) => last_err = Some(e),
         }
         if attempt + 1 < attempts {
+            if let Some(wait) = wait.as_mut() {
+                wait.tick();
+            }
             std::thread::sleep(interval);
         }
     }

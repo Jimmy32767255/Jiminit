@@ -346,9 +346,9 @@ pub(crate) fn load_dir(dir: &Path) -> Result<Vec<ServiceSpec>> {
         match std::fs::read_to_string(&path) {
             Ok(text) => match parse_service(&name, &text) {
                 Ok(spec) => services.push(spec),
-                Err(e) => crate::warn!("svc/{name}: {e:#}; skipping"),
+                Err(e) => crate::error!("svc/{name}: {e:#}; skipping"),
             },
-            Err(e) => crate::warn!("svc/{name}: cannot read {}: {e}", path.display()),
+            Err(e) => crate::error!("svc/{name}: cannot read {}: {e}", path.display()),
         }
     }
     Ok(services)
@@ -518,7 +518,7 @@ impl Supervisor {
         let mut services = match load_dir(dir) {
             Ok(services) => services,
             Err(e) => {
-                crate::warn!("svc: {e:#}");
+                crate::error!("svc: {e:#}");
                 Vec::new()
             }
         };
@@ -526,7 +526,7 @@ impl Supervisor {
         let known: BTreeSet<String> = services.iter().map(|s| s.name.clone()).collect();
         services.retain(|spec| {
             if let Some(missing) = spec.depends_on.iter().find(|d| !known.contains(*d)) {
-                crate::warn!(
+                crate::error!(
                     "svc/{}: depends on unknown service `{missing}`; skipping",
                     spec.name
                 );
@@ -538,7 +538,7 @@ impl Supervisor {
 
         let (order, cyclic) = startup_order(&services);
         for name in &cyclic {
-            crate::warn!("svc/{name}: dependency cycle; skipping");
+            crate::error!("svc/{name}: dependency cycle; skipping");
         }
         // Keep only services that can be ordered, arranged in startup order so
         // that `stop()` can simply walk the vector backwards.
@@ -557,7 +557,7 @@ impl Supervisor {
             controllers.push("cpu");
         }
         if let Err(e) = crate::cgroup::enable_controllers(&controllers) {
-            crate::warn!("cgroup: {e:#}");
+            crate::error!("cgroup: {e:#}");
         }
 
         crate::info!(
@@ -951,7 +951,7 @@ impl Supervisor {
             if let Some(run) = self.running.get_mut(&pid) {
                 run.watchdog_deadline = None;
             }
-            crate::warn!(
+            crate::error!(
                 "svc/{}: watchdog timeout (pid {pid}); killing",
                 self.services[idx].name
             );
@@ -975,7 +975,7 @@ impl Supervisor {
             if let Some(run) = self.running.values_mut().find(|run| run.idx == idx) {
                 run.oom_seen = count;
             }
-            crate::warn!(
+            crate::error!(
                 "svc/{}: OOM-killed ({} total)",
                 self.services[idx].name,
                 count
@@ -995,7 +995,7 @@ impl Supervisor {
         for item in due {
             let name = self.services[item.idx].name.clone();
             if let Err(e) = self.spawn(item.idx, item.failures) {
-                crate::err!("svc/{name}: cannot restart: {e:#}");
+                crate::fail!("svc/{name}: cannot restart: {e:#}");
             }
         }
 
@@ -1018,7 +1018,7 @@ impl Supervisor {
                 continue;
             }
             if let Err(e) = self.spawn(idx, 0) {
-                crate::err!("svc/{name}: cannot start: {e:#}");
+                crate::fail!("svc/{name}: cannot start: {e:#}");
                 self.mark_failed(idx);
             }
         }
@@ -1055,7 +1055,7 @@ impl Supervisor {
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => {
-                        crate::warn!("svc/{}: notify socket: {e}", pipe.name);
+                        crate::error!("svc/{}: notify socket: {e}", pipe.name);
                         break;
                     }
                 }
@@ -1074,7 +1074,7 @@ impl Supervisor {
                 }
             }
             if newly {
-                crate::ok!("svc/{name}: ready");
+                crate::succ!("svc/{name}: ready");
             }
         }
         for (name, value) in status {
@@ -1265,10 +1265,13 @@ impl Supervisor {
                         watchdog_deadline: spec.watchdog.map(|d| Instant::now() + d),
                     },
                 );
-                crate::ok!("svc/{}: started (pid {child})", spec.name);
+                crate::succ!("svc/{}: started (pid {child})", spec.name);
                 if let Some(path) = &notify_path {
                     if spec.notify {
-                        crate::info!("svc/{}: waiting for READY=1 on {path}", spec.name);
+                        crate::log::wait_notice(
+                            &format!("svc/{}: waiting for READY=1 on {path}", spec.name),
+                            self.ready_timeout,
+                        );
                     }
                     if let Some(watchdog) = spec.watchdog {
                         crate::info!(
@@ -1307,7 +1310,7 @@ impl Supervisor {
         if spec.limits.memory_max.is_some() {
             let count = crate::cgroup::oom_kill_count(&name);
             if count > run.oom_seen {
-                crate::warn!("svc/{name}: OOM-killed ({count} total)");
+                crate::error!("svc/{name}: OOM-killed ({count} total)");
             }
         }
 
@@ -1356,7 +1359,7 @@ impl Supervisor {
 
         failures += 1;
         if failures >= MAX_CONSECUTIVE_FAILURES {
-            crate::err!("svc/{name}: {failures} consecutive failures; giving up");
+            crate::fail!("svc/{name}: {failures} consecutive failures; giving up");
             self.mark_failed(idx);
             return true;
         }

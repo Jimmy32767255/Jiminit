@@ -49,7 +49,7 @@ pub fn parse_rules(dir: &Path) -> Rules {
         Ok(entries) => entries,
         Err(e) if e.kind() == ErrorKind::NotFound => return rules,
         Err(e) => {
-            crate::warn!("modules: cannot read {}: {e}", dir.display());
+            crate::error!("modules: cannot read {}: {e}", dir.display());
             return rules;
         }
     };
@@ -64,7 +64,7 @@ pub fn parse_rules(dir: &Path) -> Rules {
     for path in files {
         match std::fs::read_to_string(&path) {
             Ok(text) => merge_config(&text, &mut rules),
-            Err(e) => crate::warn!("modules: cannot read {}: {e}", path.display()),
+            Err(e) => crate::error!("modules: cannot read {}: {e}", path.display()),
         }
     }
     rules
@@ -199,9 +199,12 @@ fn run_install(command: &str, target: &str) -> Result<()> {
 /// Run a helper with a hard timeout: a hung modprobe or install command must
 /// not block the initramfs forever.
 fn run_with_timeout(mut command: std::process::Command) -> Result<ExitStatus> {
+    let label = format!("waiting for {}", command.get_program().to_string_lossy());
     let mut child = command.spawn().context("spawn helper")?;
+    let mut wait = crate::log::Wait::start(label, COMMAND_TIMEOUT);
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     loop {
+        wait.tick();
         if let Some(status) = child.try_wait().context("wait for helper")? {
             return Ok(status);
         }

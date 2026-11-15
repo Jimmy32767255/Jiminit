@@ -60,8 +60,8 @@ fn main() {
 
     match result {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => crate::err!("{stage:?} failed: {e:#}"),
-        Err(_) => crate::err!("{stage:?} panicked"),
+        Ok(Err(e)) => crate::crit!("{stage:?} failed: {e:#}"),
+        Err(_) => crate::crit!("{stage:?} panicked"),
     }
 
     stage2::rescue();
@@ -163,7 +163,7 @@ fn run_check() -> i32 {
     match check_config() {
         Ok(()) => 0,
         Err(e) => {
-            crate::err!("configuration check failed: {e:#}");
+            crate::fail!("configuration check failed: {e:#}");
             1
         }
     }
@@ -182,7 +182,7 @@ fn check_config() -> anyhow::Result<()> {
     }
     println!(
         "{} configuration ok: runlevel {}, getty {}",
-        crate::log::ok_tag(),
+        crate::log::succ_tag(),
         cfg.default_runlevel,
         cfg.getty
     );
@@ -323,7 +323,7 @@ fn detect_stage() -> Stage {
             }
         }
         Err(e) => {
-            crate::warn!("cannot read /proc/cmdline ({e}); guessing stage from the root fs");
+            crate::error!("cannot read /proc/cmdline ({e}); guessing stage from the root fs");
             if initramfs {
                 Stage::Initramfs
             } else {

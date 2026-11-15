@@ -25,7 +25,7 @@ pub fn load_from(bus_dir: &Path) -> usize {
     crate::info!("coldplug: {} distinct modalias entries", aliases.len());
 
     let Some(program) = crate::modules::find_modprobe() else {
-        crate::info!("coldplug: modprobe not found; skipping module autoload");
+        crate::warn!("coldplug: modprobe not found; skipping module autoload");
         return 0;
     };
 
@@ -37,8 +37,8 @@ pub fn load_from(bus_dir: &Path) -> usize {
             .status()
         {
             Ok(status) if status.success() => matched += 1,
-            Ok(status) => crate::warn!("coldplug: modprobe {alias}: {status}"),
-            Err(e) => crate::warn!("coldplug: run {program} {alias}: {e}"),
+            Ok(status) => crate::debug!("coldplug: modprobe {alias}: {status}"),
+            Err(e) => crate::error!("coldplug: run {program} {alias}: {e}"),
         }
     }
     crate::info!(

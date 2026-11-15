@@ -1,39 +1,71 @@
-//! Minimal logger.
+//! Minimal logger with syslog-style severities.
 //!
 //! Log records go to stderr (which, for PID 1, is the kernel console) and to
 //! `/dev/kmsg` when available, so messages also show up in `dmesg` and on
 //! serial consoles that the kernel uses for printk. Once the config is loaded
 //! stage2 also appends to a size-capped file (default `/var/log/jiminit.log`).
 //!
-//! Every line looks like `[   12.345] [  OK  ] message`: the first column is
-//! the time since jiminit started, the second is a fixed-width status tag.
-//! Colors are only written to terminals and never reach kmsg or the log file.
+//! Every line looks like `[   12.345] [ INFO ] message`: the first column is
+//! the time since jiminit started, the second is a fixed-width 6-character
+//! tag. Colors are only written to terminals and never reach kmsg or the log
+//! file.
+//!
+//! Tags, in increasing severity: `[TRACE ]`, `[DE BUG]`, `[ INFO ]`,
+//! `[ MESG ]`, `[ WARN ]`, `[ERR OR]`, `[CRITIC]`. `[ SUCC ]` and `[ FAIL ]`
+//! mark the outcome of one operation (logged at INFO and ERROR severity), and
+//! `[ WAIT ]` renders an animated progress line for a bounded wait.
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Rotate the log file once it would grow past this size.
 const MAX_FILE_BYTES: u64 = 1 << 20;
 
-const TAG_OK: &str = "[  OK  ]";
+/// How often the `[ WAIT ]` spinner redraws its line.
+const WAIT_REDRAW: Duration = Duration::from_millis(100);
+
+/// Waits shorter than this stay silent: a 20ms modprobe does not deserve a
+/// progress line.
+const WAIT_GRACE: Duration = Duration::from_millis(300);
+
+/// The classic `- \ | /` spinner.
+const SPINNER: [char; 4] = ['-', '\\', '|', '/'];
+
+/// Every tag is exactly 6 characters wide between the brackets, e.g.
+/// `[ WARN ]`, `[DE BUG]`, `[TRACE ]`.
+const TAG_SUCC: &str = "[ SUCC ]";
 const TAG_INFO: &str = "[ INFO ]";
 const TAG_WARN: &str = "[ WARN ]";
+const TAG_MESG: &str = "[ MESG ]";
+const TAG_DEBUG: &str = "[DE BUG]";
+const TAG_TRACE: &str = "[TRACE ]";
 const TAG_FAIL: &str = "[ FAIL ]";
+const TAG_ERROR: &str = "[ERR OR]";
+const TAG_CRIT: &str = "[CRITIC]";
+const TAG_WAIT: &str = "[ WAIT ]";
 
-const ANSI_OK: &str = "1;32";
-const ANSI_WARN: &str = "1;33";
-const ANSI_FAIL: &str = "1;31";
+const ANSI_SUCC: &str = "92";
+const ANSI_INFO: &str = "37";
+const ANSI_WARN: &str = "93";
+const ANSI_MESG: &str = "96";
+const ANSI_DEBUG: &str = "34";
+const ANSI_TRACE: &str = "90";
+const ANSI_FAIL: &str = "91";
+const ANSI_ERROR: &str = "31";
+const ANSI_CRIT: &str = "41;30";
+const ANSI_WAIT: &str = "36";
 const ANSI_DIM: &str = "2";
 
 static KMSG: OnceLock<Option<Mutex<File>>> = OnceLock::new();
 static LOG_FILE: OnceLock<Option<Mutex<FileSink>>> = OnceLock::new();
 static START: OnceLock<Instant> = OnceLock::new();
 static COLOR_MODE: AtomicU8 = AtomicU8::new(0);
+static THRESHOLD: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
 struct FileSink {
     file: File,
@@ -66,6 +98,64 @@ impl Color {
             Color::Never => false,
             Color::Auto => unsafe { libc::isatty(fd) == 1 },
         }
+    }
+}
+
+/// Severity of a log record; `log_level` drops everything below the threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    /// Needs the user's attention (confirmation, action), above plain info.
+    Message = 3,
+    Warn = 4,
+    Error = 5,
+    Critical = 6,
+}
+
+impl Level {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "trace" => Some(Level::Trace),
+            "debug" => Some(Level::Debug),
+            "info" => Some(Level::Info),
+            "mesg" | "message" | "notice" => Some(Level::Message),
+            "warn" | "warning" => Some(Level::Warn),
+            "error" | "err" => Some(Level::Error),
+            "crit" | "critical" => Some(Level::Critical),
+            _ => None,
+        }
+    }
+
+    /// The tag, color and kmsg priority a record of this level uses.
+    fn tag(self) -> (&'static str, &'static str, u8) {
+        match self {
+            Level::Trace => (TAG_TRACE, ANSI_TRACE, 7),
+            Level::Debug => (TAG_DEBUG, ANSI_DEBUG, 7),
+            Level::Info => (TAG_INFO, ANSI_INFO, 6),
+            Level::Message => (TAG_MESG, ANSI_MESG, 5),
+            Level::Warn => (TAG_WARN, ANSI_WARN, 4),
+            Level::Error => (TAG_ERROR, ANSI_ERROR, 3),
+            Level::Critical => (TAG_CRIT, ANSI_CRIT, 2),
+        }
+    }
+}
+
+/// Which records are written at all.
+pub fn set_level(level: Level) {
+    THRESHOLD.store(level as u8, Ordering::Relaxed);
+}
+
+pub fn level() -> Level {
+    match THRESHOLD.load(Ordering::Relaxed) {
+        0 => Level::Trace,
+        1 => Level::Debug,
+        2 => Level::Info,
+        3 => Level::Message,
+        4 => Level::Warn,
+        5 => Level::Error,
+        _ => Level::Critical,
     }
 }
 
@@ -108,6 +198,11 @@ pub fn stdout_colors() -> bool {
     color_mode().enabled(1)
 }
 
+/// Whether the log stream can be redrawn in place (a real terminal).
+fn stderr_is_tty() -> bool {
+    std::io::stderr().is_terminal()
+}
+
 /// Wrap `text` in an SGR sequence when stdout colors are enabled.
 pub fn paint_stdout(text: &str, code: &str) -> String {
     if stdout_colors() {
@@ -117,9 +212,9 @@ pub fn paint_stdout(text: &str, code: &str) -> String {
     }
 }
 
-/// The green `[  OK  ]` tag, for query commands that print without a prefix.
-pub fn ok_tag() -> String {
-    paint_stdout(TAG_OK, ANSI_OK)
+/// The green `[ SUCC ]` tag, for query commands that print without a prefix.
+pub fn succ_tag() -> String {
+    paint_stdout(TAG_SUCC, ANSI_SUCC)
 }
 
 /// Start appending to `path` (an empty path disables the file sink). Errors
@@ -164,8 +259,31 @@ fn elapsed() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn emit(tag: &str, ansi: &str, priority: u8, msg: &str) {
-    let stamp = format!("[{:>9.3}]", elapsed());
+fn stamp() -> String {
+    format!("[{:>9.3}]", elapsed())
+}
+
+fn emit(level: Level, msg: &str) {
+    let (tag, ansi, priority) = level.tag();
+    write_record(tag, ansi, priority, level, msg);
+}
+
+/// One operation succeeded (`[ SUCC ]`, gated at INFO severity).
+pub fn succ(msg: &str) {
+    write_record(TAG_SUCC, ANSI_SUCC, 6, Level::Info, msg);
+}
+
+/// One operation failed (`[ FAIL ]`, gated at ERROR severity).
+pub fn fail(msg: &str) {
+    write_record(TAG_FAIL, ANSI_FAIL, 3, Level::Error, msg);
+}
+
+/// Render one record to stderr, `/dev/kmsg` and the log file.
+fn write_record(tag: &str, ansi: &str, priority: u8, level: Level, msg: &str) {
+    if level < self::level() {
+        return;
+    }
+    let stamp = stamp();
     let plain = format!("{stamp} {tag} {msg}\n");
 
     let mut line = String::with_capacity(plain.len() + 16);
@@ -176,11 +294,16 @@ fn emit(tag: &str, ansi: &str, priority: u8, msg: &str) {
     } else {
         line.push_str(&plain);
     }
+
+    write_streams(&plain, tag, priority, msg);
     // PID 1 must never panic because a log target is broken (for example the
     // console disappeared), so ignore write errors instead of using eprintln!,
     // which panics if writing to stderr fails.
     let _ = std::io::stderr().write_all(line.as_bytes());
+}
 
+/// Write a record to `/dev/kmsg` and the log file, never to stderr.
+fn write_streams(plain: &str, tag: &str, priority: u8, msg: &str) {
     if let Some(Some(kmsg)) = KMSG.get() {
         if let Ok(mut file) = kmsg.lock() {
             // /dev/kmsg treats every write() as one record, so build the full
@@ -192,7 +315,7 @@ fn emit(tag: &str, ansi: &str, priority: u8, msg: &str) {
     }
     if let Some(Some(sink)) = LOG_FILE.get() {
         if let Ok(mut sink) = sink.lock() {
-            sink.write(&plain);
+            sink.write(plain);
         }
     }
 }
@@ -225,20 +348,156 @@ impl FileSink {
     }
 }
 
-pub fn info(msg: &str) {
-    emit(TAG_INFO, "0", 6, msg);
+macro_rules! log_fn {
+    ($name:ident, $level:expr) => {
+        pub fn $name(msg: &str) {
+            emit($level, msg);
+        }
+    };
 }
 
-pub fn ok(msg: &str) {
-    emit(TAG_OK, ANSI_OK, 6, msg);
+log_fn!(trace, Level::Trace);
+log_fn!(debug, Level::Debug);
+log_fn!(info, Level::Info);
+log_fn!(mesg, Level::Message);
+log_fn!(warn, Level::Warn);
+log_fn!(error, Level::Error);
+log_fn!(crit, Level::Critical);
+
+/// Log one static `[ WAIT ]` line for an asynchronous wait (no animation).
+pub fn wait_notice(label: &str, limit: Duration) {
+    write_record(
+        TAG_WAIT,
+        ANSI_WAIT,
+        6,
+        Level::Info,
+        &format!("{label} (timeout {}s)", limit.as_secs()),
+    );
 }
 
-pub fn warn(msg: &str) {
-    emit(TAG_WARN, ANSI_WARN, 4, msg);
+/// A bounded wait: `[ WAIT ] - 0s/3s label` with a spinner on a terminal.
+///
+/// Call `tick()` from the wait loop, then `finish()` before logging the
+/// outcome. Waits shorter than [`WAIT_GRACE`] stay silent. On a terminal the
+/// line is redrawn in place and erased at the end; elsewhere one plain line is
+/// logged (and also recorded in kmsg/the log file) once the grace passed.
+pub struct Wait {
+    label: String,
+    limit: Duration,
+    started: Instant,
+    last_draw: Instant,
+    frame: usize,
+    tty: bool,
+    /// Whether the wait outlived [`WAIT_GRACE`] and was announced.
+    announced: bool,
+    /// Whether an animated line is on screen and must be erased.
+    drawn: bool,
+    /// Set once the line has been erased so `Drop` does not erase it twice.
+    done: bool,
 }
 
-pub fn err(msg: &str) {
-    emit(TAG_FAIL, ANSI_FAIL, 3, msg);
+impl Wait {
+    pub fn start(label: impl Into<String>, limit: Duration) -> Self {
+        let tty = stderr_is_tty();
+        Self {
+            label: label.into(),
+            limit,
+            started: Instant::now(),
+            last_draw: Instant::now() - WAIT_REDRAW,
+            frame: 0,
+            tty,
+            announced: false,
+            drawn: false,
+            done: false,
+        }
+    }
+
+    /// Announce the wait after [`WAIT_GRACE`] and redraw at most every
+    /// [`WAIT_REDRAW`]; call it from the wait loop.
+    pub fn tick(&mut self) {
+        if self.done {
+            return;
+        }
+        if !self.announced {
+            if self.started.elapsed() < WAIT_GRACE {
+                return;
+            }
+            self.announced = true;
+            if self.tty {
+                self.draw();
+                self.drawn = true;
+            } else {
+                wait_notice(&self.label.clone(), self.limit);
+            }
+            return;
+        }
+        if self.tty && self.last_draw.elapsed() >= WAIT_REDRAW {
+            self.draw();
+        }
+    }
+
+    /// Erase the animated line (on a terminal) before the caller logs a result.
+    pub fn finish(mut self) {
+        self.erase();
+    }
+
+    fn draw(&mut self) {
+        let spin = SPINNER[self.frame % SPINNER.len()];
+        self.frame += 1;
+        self.last_draw = Instant::now();
+        let stamp = stamp();
+        let line = format!(
+            "{stamp} {TAG_WAIT} - {}s/{}s {} {spin}",
+            self.started.elapsed().as_secs(),
+            self.limit.as_secs(),
+            self.label
+        );
+        let mut out = String::with_capacity(line.len() + 24);
+        out.push_str("\r\x1b[2K");
+        if log_colors() {
+            out.push_str(&format!(
+                "\x1b[{ANSI_DIM}m{stamp}\x1b[0m \x1b[{ANSI_WAIT}m{TAG_WAIT}\x1b[0m - {}s/{}s {} {spin}",
+                self.started.elapsed().as_secs(),
+                self.limit.as_secs(),
+                self.label
+            ));
+        } else {
+            out.push_str(&line);
+        }
+        let _ = std::io::stderr().write_all(out.as_bytes());
+        let _ = std::io::stderr().flush();
+    }
+
+    fn erase(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        if self.tty && self.drawn {
+            let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+            let _ = std::io::stderr().flush();
+        }
+    }
+}
+
+impl Drop for Wait {
+    fn drop(&mut self) {
+        self.erase();
+    }
+}
+
+#[macro_export]
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        $crate::log::trace(&format!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        $crate::log::debug(&format!($($arg)*))
+    };
 }
 
 #[macro_export]
@@ -249,9 +508,9 @@ macro_rules! info {
 }
 
 #[macro_export]
-macro_rules! ok {
+macro_rules! mesg {
     ($($arg:tt)*) => {
-        $crate::log::ok(&format!($($arg)*))
+        $crate::log::mesg(&format!($($arg)*))
     };
 }
 
@@ -263,9 +522,30 @@ macro_rules! warn {
 }
 
 #[macro_export]
-macro_rules! err {
+macro_rules! error {
     ($($arg:tt)*) => {
-        $crate::log::err(&format!($($arg)*))
+        $crate::log::error(&format!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! crit {
+    ($($arg:tt)*) => {
+        $crate::log::crit(&format!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! succ {
+    ($($arg:tt)*) => {
+        $crate::log::succ(&format!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! fail {
+    ($($arg:tt)*) => {
+        $crate::log::fail(&format!($($arg)*))
     };
 }
 
@@ -279,5 +559,51 @@ mod tests {
         assert_eq!(Color::parse(" ALWAYS "), Some(Color::Always));
         assert_eq!(Color::parse("never"), Some(Color::Never));
         assert_eq!(Color::parse("sometimes"), None);
+    }
+
+    #[test]
+    fn parses_levels_and_orders_them() {
+        assert_eq!(Level::parse("TRACE"), Some(Level::Trace));
+        assert_eq!(Level::parse("debug"), Some(Level::Debug));
+        assert_eq!(Level::parse("notice"), Some(Level::Message));
+        assert_eq!(Level::parse("warning"), Some(Level::Warn));
+        assert_eq!(Level::parse("err"), Some(Level::Error));
+        assert_eq!(Level::parse("crit"), Some(Level::Critical));
+        assert_eq!(Level::parse("nonsense"), None);
+        assert!(Level::Trace < Level::Debug);
+        assert!(Level::Info < Level::Message);
+        assert!(Level::Message < Level::Warn);
+        assert!(Level::Warn < Level::Error);
+        assert!(Level::Error < Level::Critical);
+    }
+
+    #[test]
+    fn tags_are_six_characters_wide() {
+        for tag in [
+            TAG_SUCC, TAG_INFO, TAG_WARN, TAG_MESG, TAG_DEBUG, TAG_TRACE, TAG_FAIL, TAG_ERROR,
+            TAG_CRIT, TAG_WAIT,
+        ] {
+            assert!(tag.starts_with('[') && tag.ends_with(']'), "{tag}");
+            assert_eq!(tag.chars().count(), 8, "{tag}");
+        }
+    }
+
+    #[test]
+    fn threshold_filters_lower_levels() {
+        set_level(Level::Warn);
+        assert!(Level::Message < level());
+        assert!(Level::Warn >= level());
+        set_level(Level::Info);
+        assert!(Level::Debug < level());
+        assert!(Level::Info >= level());
+    }
+
+    #[test]
+    fn wait_renders_without_a_terminal() {
+        // The test harness has no tty on stderr, so this exercises the static
+        // path and must not panic.
+        let wait = Wait::start("test wait", Duration::from_secs(3));
+        assert!(!wait.tty);
+        drop(wait);
     }
 }

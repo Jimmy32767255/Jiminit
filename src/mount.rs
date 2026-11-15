@@ -93,9 +93,9 @@ fn mount_or_report(source: &str, target: &str, fstype: &str, flags: MsFlags, dat
             crate::info!("{target} is already a mount point; leaving it alone");
         }
         Err(Errno::EBUSY) => {
-            crate::warn!("mount {fstype} on {target}: target is busy but is not a mount point");
+            crate::error!("mount {fstype} on {target}: target is busy but is not a mount point");
         }
-        Err(e) => crate::warn!("mount {fstype} on {target} failed: {e}"),
+        Err(e) => crate::error!("mount {fstype} on {target} failed: {e}"),
     }
 }
 

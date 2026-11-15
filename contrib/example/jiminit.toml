@@ -20,6 +20,8 @@ getty_tty_basename = true
 ttys = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
 serial_ttys = []
 log_file = "/var/log/jiminit.log"
+# trace/debug/info/mesg/warn/error/crit
+log_level = "info"
 # auto = only on terminals, always, never
 color = "auto"
 cgroup = true

@@ -25,6 +25,9 @@ pub struct Config {
     pub init_path: String,
     /// Append init logs here (empty disables the file sink).
     pub log_file: String,
+    /// Minimum severity written to the log (`trace`/`debug`/`info`/`mesg`/
+    /// `warn`/`error`/`crit`).
+    pub log_level: String,
     /// Directory with `*.toml` service definitions.
     pub services_dir: String,
     /// Put each service into its own cgroup v2 subtree.
@@ -64,6 +67,7 @@ impl Default for Config {
             shutdown_timeout_ms: 3000,
             init_path: "/sbin/jiminit".to_string(),
             log_file: "/var/log/jiminit.log".to_string(),
+            log_level: "info".to_string(),
             services_dir: crate::service::DEFAULT_DIR.to_string(),
             cgroup: true,
             ready_timeout_ms: 5_000,
@@ -81,6 +85,20 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Parsed [`crate::log::Level`]; an invalid value falls back to `info`.
+    pub fn level_choice(&self) -> crate::log::Level {
+        match crate::log::Level::parse(&self.log_level) {
+            Some(level) => level,
+            None => {
+                crate::warn!(
+                    "log_level = {:?} is not trace/debug/info/mesg/warn/error/crit; using info",
+                    self.log_level
+                );
+                crate::log::Level::Info
+            }
+        }
+    }
+
     /// Parsed [`crate::log::Color`]; an invalid value falls back to `auto`.
     pub fn color_choice(&self) -> crate::log::Color {
         match crate::log::Color::parse(&self.color) {
@@ -107,7 +125,7 @@ pub fn load(path: &Path) -> Result<Config> {
             Ok(cfg)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            crate::info!("{}: not found; using defaults", path.display());
+            crate::error!("{}: not found; using defaults", path.display());
             Ok(Config::default())
         }
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
@@ -120,7 +138,7 @@ pub fn load_or_default(path: &Path) -> Config {
     match load(path) {
         Ok(cfg) => cfg,
         Err(e) => {
-            crate::warn!("{e:#}; using defaults");
+            crate::error!("{e:#}; using defaults");
             Config::default()
         }
     }
@@ -176,6 +194,19 @@ mod tests {
         assert_eq!(cfg.console, "/dev/console");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn level_choice_parses_and_falls_back_to_info() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.log_level, "info");
+        assert_eq!(cfg.level_choice(), crate::log::Level::Info);
+        cfg.log_level = "debug".into();
+        assert_eq!(cfg.level_choice(), crate::log::Level::Debug);
+        cfg.log_level = "crit".into();
+        assert_eq!(cfg.level_choice(), crate::log::Level::Critical);
+        cfg.log_level = "chatty".into();
+        assert_eq!(cfg.level_choice(), crate::log::Level::Info);
     }
 
     #[test]

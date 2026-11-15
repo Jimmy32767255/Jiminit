@@ -4,7 +4,7 @@
 //! orderly shutdown/reboot/soft-reboot.
 
 use crate::config::Config;
-use crate::runlevel::{Level, Target};
+use crate::runlevel::Level;
 use crate::service::Supervisor;
 use anyhow::{Context, Result};
 use nix::errno::Errno;
@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 /// so pending restarts and shutdown deadlines are processed on time.
 const LOOP_TIMEOUT_MS: u16 = 100;
 
-/// Where `jiminit --status` / `jiminit --runlevel` find the control socket.
+/// Where the client sub-commands find the control socket.
 pub const CONTROL_PATH: &str = "/run/jiminit.sock";
 
 /// Delay before respawning a crashed getty; doubles up to the cap. Sessions
@@ -745,6 +745,24 @@ fn handle_client(
     let request = String::from_utf8_lossy(&buf[..read]);
     let command = request.trim();
 
+    // Suspend and hibernate freeze the machine, so they answer only after the
+    // wake-up and never turn into a shutdown action.
+    if power_state_request(command) {
+        let result = if command == "suspend" {
+            crate::power::suspend()
+        } else {
+            crate::power::hibernate()
+        };
+        let reply = match result {
+            Ok(()) => format!("ok resumed from {command}\n"),
+            Err(e) => format!("error {e:#}\n"),
+        };
+        if let Err(e) = stream.write_all(reply.as_bytes()) {
+            crate::warn!("cannot reply on {CONTROL_PATH}: {e}");
+        }
+        return None;
+    }
+
     let (reply, action) = if command == "status" {
         let mut reply = format!("status {}\n", level.name());
         for line in supervisor.status_lines() {
@@ -752,25 +770,41 @@ fn handle_client(
             reply.push('\n');
         }
         (reply, None)
+    } else if let Some(name) = command.strip_prefix("status ") {
+        match supervisor.status_line_for(name.trim()) {
+            Ok(line) => (format!("status {}\n{line}\n", level.name()), None),
+            Err(e) => (format!("error {e:#}\n"), None),
+        }
+    } else if command == "list" {
+        let mut reply = String::from("list\n");
+        for name in supervisor.list_lines() {
+            reply.push_str(&name);
+            reply.push('\n');
+        }
+        (reply, None)
     } else if command == "metrics" {
         (supervisor.metrics(level.name()), None)
+    } else if command == "runlevel" {
+        (format!("runlevel {}\n", level.name()), None)
     } else if let Some(name) = command.strip_prefix("runlevel ") {
         runlevel_request(cfg, name.trim(), level, supervisor, getties, single_shell)
     } else if let Some(rest) = command.strip_prefix("service ") {
         let mut parts = rest.splitn(2, ' ');
         match (parts.next(), parts.next()) {
-            (Some(name), Some(action)) => match supervisor.control(name, action.trim()) {
+            (Some(action), Some(name)) => match supervisor.control(name.trim(), action.trim()) {
                 Ok(message) => (format!("{message}\n"), None),
                 Err(e) => (format!("error {e:#}\n"), None),
             },
             _ => (
-                "error usage: service <name> <start|stop|restart|reload>\n".to_string(),
+                "error usage: service <start|stop|restart|reload> <name>\n".to_string(),
                 None,
             ),
         }
+    } else if let Some(action) = power_action(command) {
+        (format!("ok {command}\n"), Some(action))
     } else {
         (
-            "error unknown request (try `status`, `metrics`, `runlevel <name>` or `service <name> <action>`)\n"
+            "error unknown request (try `status [service]`, `list`, `metrics`, `runlevel [name]`, `service <action> <name>`, `poweroff`, `reboot`, `halt`, `soft-reboot`, `suspend` or `hibernate`)\n"
                 .to_string(),
             None,
         )
@@ -790,21 +824,38 @@ fn runlevel_request(
     getties: &mut Vec<Getty>,
     single_shell: &mut Option<Pid>,
 ) -> (String, Option<Action>) {
-    match Target::parse(name) {
-        Some(Target::Level(target)) => {
+    match Level::parse(name) {
+        Some(target) => {
             if target == *level {
                 return (format!("ok runlevel {target}\n"), None);
             }
             switch_level(cfg, target, level, supervisor, getties, single_shell);
             (format!("ok runlevel {target}\n"), None)
         }
-        Some(Target::PowerOff) => ("ok poweroff\n".to_string(), Some(Action::PowerOff)),
-        Some(Target::Reboot) => ("ok reboot\n".to_string(), Some(Action::Reboot)),
         None => (
-            format!("error unknown runlevel `{name}`; use single, multi-user or graphical\n"),
+            format!(
+                "error unknown runlevel `{name}`; use single, multi-user or graphical \
+                 (power commands are `jiminit poweroff`, `jiminit reboot`, ...)\n"
+            ),
             None,
         ),
     }
+}
+
+/// Shutdown verbs accepted on the control socket.
+fn power_action(command: &str) -> Option<Action> {
+    match command {
+        "poweroff" => Some(Action::PowerOff),
+        "reboot" => Some(Action::Reboot),
+        "halt" => Some(Action::Halt),
+        "soft-reboot" => Some(Action::SoftReboot),
+        _ => None,
+    }
+}
+
+/// Suspend and hibernate are handled inline instead of as a shutdown action.
+fn power_state_request(command: &str) -> bool {
+    matches!(command, "suspend" | "hibernate")
 }
 
 /// Move between runlevels: stop the sessions and services that do not belong
@@ -1036,6 +1087,8 @@ fn stop_display_holders(supervisor: &mut Supervisor) {
 #[derive(Debug, Clone, Copy)]
 enum Action {
     PowerOff,
+    /// Stop everything and halt, leaving the machine powered on.
+    Halt,
     Reboot,
     /// Stop everything, then exec a fresh stage 2 in this same PID instead of
     /// asking the kernel to reboot.
@@ -1124,6 +1177,7 @@ fn shutdown(
 
     let how = match mode {
         Action::PowerOff => nix::sys::reboot::RebootMode::RB_POWER_OFF,
+        Action::Halt => nix::sys::reboot::RebootMode::RB_HALT_SYSTEM,
         Action::Reboot => nix::sys::reboot::RebootMode::RB_AUTOBOOT,
         Action::SoftReboot => unreachable!("handled before the reboot syscall"),
     };

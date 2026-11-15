@@ -160,7 +160,7 @@ EOF
 cat > "$ROOT/etc/jiminit/services.d/notifier.toml" <<'EOF'
 # Example: announces readiness through sd_notify after one second.
 exec = "/bin/sh"
-args = ["-c", "sleep 1; /sbin/jiminit --notify-send \"$NOTIFY_SOCKET\" READY=1; sleep 600"]
+args = ["-c", "sleep 1; /sbin/jiminit notify-send \"$NOTIFY_SOCKET\" READY=1; sleep 600"]
 notify = true
 restart = "never"
 EOF
@@ -176,7 +176,7 @@ EOF
 cat > "$ROOT/etc/jiminit/services.d/watcher.toml" <<'EOF'
 # Example: keeps a 2s watchdog alive by pinging every second.
 exec = "/bin/sh"
-args = ["-c", "while true; do /sbin/jiminit --notify-send \"$NOTIFY_SOCKET\" WATCHDOG=1; sleep 1; done"]
+args = ["-c", "while true; do /sbin/jiminit notify-send \"$NOTIFY_SOCKET\" WATCHDOG=1; sleep 1; done"]
 watchdog = "2s"
 restart = "never"
 EOF

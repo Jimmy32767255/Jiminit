@@ -47,18 +47,40 @@ PID 1 自己不占控制终端，getty/shell 各自 `setsid` + `TIOCSCTTY`。
 `/run/jiminit.sock`，权限 `0600`，只有 root 能连。客户端就是 jiminit 自己：
 
 ```sh
-jiminit --status
-jiminit --runlevel single
-jiminit --runlevel 3           # 数字别名
-jiminit --runlevel reboot      # 6/reboot 重启；0/poweroff/halt 关机
-jiminit --service ticker restart
-jiminit --metrics               # Prometheus 文本
+jiminit status                 # 运行级 + 每个服务一行
+jiminit status sddm            # 只看一个服务
+jiminit status --watch 2       # 每 2 秒刷新
+jiminit list                   # 已配置的服务名
+jiminit runlevel               # 当前运行级
+jiminit runlevel single
+jiminit runlevel 3             # 数字别名
+jiminit service restart ticker
+jiminit metrics                # Prometheus 文本
 ```
 
-`--runlevel 0|6` 不会“进入”某个级别，而是直接走关机/重启流程。未知级别返回
-`error ...`，客户端退出码为 1。
+未知级别返回 `error ...`，客户端退出码为 1。关机/重启不再借用运行级，而是独立子命令
+（见下节）。
 
-`--status` 首行是运行级，其余每个服务一行：
+## 关机、重启与挂起
+
+```sh
+jiminit reboot        # 等价于 SIGINT / ctrl-alt-del
+jiminit poweroff      # 等价于 SIGTERM
+jiminit halt          # 停止后 RB_HALT_SYSTEM，不断电
+jiminit soft-reboot   # 等价于 SIGUSR1：flush、重建 /run 与 /tmp、exec 自己
+jiminit suspend       # /sys/power/state 写 mem
+jiminit hibernate     # /sys/power/state 写 disk
+```
+
+`reboot`/`poweroff`/`halt`/`soft-reboot` 先按 `shutdown_timeout_ms` 停会话与服务、
+flush 文件系统，再 remount `/` 只读并调用 `reboot(2)`。`suspend`/`hibernate` 不动服务，
+只做一次 `sync` 后写 `/sys/power/state`；客户端会一直等到机器唤醒/恢复，然后打印
+`ok resumed from suspend`。目标状态不受内核支持时（例如没有 swap 时 `disk`）返回
+`error ... (available: ...)`，不会挂起。
+
+信号仍然保留作为兜底：SIGTERM 关机、SIGINT（ctrl-alt-del）重启、SIGUSR1 软重启。
+
+`status` 首行是运行级，其余每个服务一行：
 
 ```text
 status multi-user
@@ -72,7 +94,7 @@ CPU 累计时间、`memory.peak`、`pids.current`、io 读写字节。没有对�
 显示 `-`；`io` 只在启用 io 控制器时才有值（当前没有 io 限制配置，所以通常是
 `-`）。
 
-`jiminit --metrics` 输出同一份数据的 Prometheus 文本格式，可直接交给抓取器：
+`jiminit metrics` 输出同一份数据的 Prometheus 文本格式，可直接交给抓取器：
 
 ```text
 jiminit_build_info{version="0.1.0"} 1

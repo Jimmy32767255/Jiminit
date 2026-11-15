@@ -66,4 +66,4 @@ else
     echo "skipped GRUB entry; set INSTALL_GRUB=1 to install it" >&2
 fi
 
-"$ROOT/out/jiminit" --check
+"$ROOT/out/jiminit" check

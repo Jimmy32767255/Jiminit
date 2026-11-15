@@ -54,7 +54,7 @@ cpu_max = "50000 100000"
 - 依赖项最终失败时（启动失败、连续重启放弃、`restart = "never"` 退出、手动 stop），
   尚未启动的依赖方标记失败并记
   `svc/x: not started: dependency 'y' failed`；已经运行的依赖方收到 SIGTERM 级联停止。
-  依赖恢复后不会自动把停掉的依赖方拉回来，需要手动 `jiminit --service x start`。
+  依赖恢复后不会自动把停掉的依赖方拉回来，需要手动 `jiminit service start x`。
 
 ## 重启策略
 
@@ -83,7 +83,7 @@ jiminit 记一条告警并按就绪继续，避免整条依赖链死等。
 `STATUS=...` 会被转发到日志。脚本里可以直接用 jiminit 自己的客户端：
 
 ```sh
-jiminit --notify-send "$NOTIFY_SOCKET" READY=1
+jiminit notify-send "$NOTIFY_SOCKET" READY=1
 ```
 
 看门狗复用同一个 socket：
@@ -129,18 +129,18 @@ cpu_max = "50000 100000"    # quota period，微秒
 - `cgroup = true`（默认）时每个服务在 `/sys/fs/cgroup/jiminit/<name>` 下，
   关机超时会用 `cgroup.kill` 连脱离进程组的孙进程一起清理。
 - 服务退出、目录为空后，下一轮 `tick` 会尝试删除该目录；如果还有逃逸进程，删除失败、
-  目录保留，`--status` 里对应服务显示为 stopped。
+  目录保留，`status` 里对应服务显示为 stopped。
 
 ## 控制与状态
 
 运行中的 init 通过 `/run/jiminit.sock`（权限 0600）接受以下命令：
 
 ```sh
-jiminit --status                    # 运行级 + 每服务一行
-jiminit --service ticker start
-jiminit --service ticker stop
-jiminit --service ticker restart
-jiminit --service ticker reload     # 发 SIGHUP
+jiminit status                    # 运行级 + 每服务一行
+jiminit service start ticker
+jiminit service stop ticker
+jiminit service restart ticker
+jiminit service reload ticker     # 发 SIGHUP
 ```
 
 手动 stop 不会被重启策略覆盖；`restart` 会等旧进程退出后再拉起。

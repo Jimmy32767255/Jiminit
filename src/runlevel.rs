@@ -2,9 +2,9 @@
 //!
 //! Only the three levels Jiminit actually distinguishes exist: `single`
 //! (maintenance shell), `multi-user` (services + getty) and `graphical`
-//! (multi-user plus anything tagged graphical). `0`/`poweroff` and
-//! `6`/`reboot` are accepted as targets by the control client but are not
-//! runlevels: they end up in an orderly shutdown instead.
+//! (multi-user plus anything tagged graphical). Power operations
+//! (`jiminit poweroff`, `jiminit reboot`, ...) are separate sub-commands, not
+//! runlevels.
 
 use std::fmt;
 
@@ -44,24 +44,6 @@ impl fmt::Display for Level {
     }
 }
 
-/// A parsed `jiminit --runlevel` argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Target {
-    Level(Level),
-    PowerOff,
-    Reboot,
-}
-
-impl Target {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "0" | "poweroff" | "halt" => Some(Target::PowerOff),
-            "6" | "reboot" => Some(Target::Reboot),
-            name => Level::parse(name).map(Target::Level),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,18 +58,6 @@ mod tests {
         assert_eq!(Level::parse("graphical"), Some(Level::Graphical));
         assert_eq!(Level::parse("5"), Some(Level::Graphical));
         assert_eq!(Level::parse("bogus"), None);
-    }
-
-    #[test]
-    fn power_targets_are_not_levels() {
-        assert_eq!(Target::parse("poweroff"), Some(Target::PowerOff));
-        assert_eq!(Target::parse("0"), Some(Target::PowerOff));
-        assert_eq!(Target::parse("reboot"), Some(Target::Reboot));
-        assert_eq!(Target::parse("6"), Some(Target::Reboot));
-        assert_eq!(
-            Target::parse("multi-user"),
-            Some(Target::Level(Level::MultiUser))
-        );
     }
 
     #[test]

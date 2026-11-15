@@ -66,11 +66,12 @@ cat /proc/1/comm            # jiminit
 tty                         # /dev/ttyS0
 hostname                    # jiminit-qemu
 
-jiminit --status            # 运行级 + 每个服务一行状态
-jiminit --runlevel single   # 切单用户；当前登录会话会被结束
-jiminit --runlevel multi-user
-kill -TERM 1                # 有序关机，QEMU 退出
-kill -INT 1                 # 重启
+jiminit status            # 运行级 + 每个服务一行状态
+jiminit runlevel single   # 切单用户；当前登录会话会被结束
+jiminit runlevel multi-user
+jiminit poweroff            # 有序关机，QEMU 退出
+jiminit reboot              # 重启
+# 信号仍然是兜底：kill -TERM 1 关机，kill -INT 1 重启
 ```
 
 `single` 级没有 getty，直接在 console 上给你一个 root shell；切回 `multi-user`

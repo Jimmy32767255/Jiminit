@@ -44,5 +44,5 @@ sudo INSTALL_GRUB=1 ./contrib/example/install-example.sh
 ## 只验证配置
 
 ```sh
-jiminit --check
+jiminit check
 ```

@@ -120,18 +120,30 @@ name  device  keyfile  options
 
 ## 命令行
 
+操作一律是子命令，选项只做修饰（`--watch`、`--no-color`、`-h`、`-V`）。
+
 | 命令 | 行为 |
 | --- | --- |
-| `jiminit --status` | 打印运行级与每个服务的状态（pid/重启次数/就绪/内存/CPU/pids/io） |
-| `jiminit --runlevel <name\|1\|3\|5\|0\|6\|poweroff\|halt\|reboot>` | 切换运行级或触发关机/重启 |
-| `jiminit --service <name> <start\|stop\|restart\|reload>` | 控制单个服务 |
-| `jiminit --notify-send <socket> <message>` | 发 sd_notify 数据报 |
-| `jiminit --metrics` | 以 Prometheus 文本格式输出运行级与服务指标 |
-| `jiminit --check` | 校验配置与服务依赖，打印缩进依赖树与启动顺序 |
-| `jiminit --graph` | 以 Graphviz DOT 输出服务依赖图（不连接运行中的 init） |
-| `jiminit --stage1` / `--stage2` | 强制阶段（调试用） |
+| `jiminit status [service]` | 打印运行级与每个服务的状态（pid/重启次数/就绪/内存/CPU/pids/io）；给 `service` 只看一个 |
+| `jiminit status --watch[=SECS]` | 每 SECS 秒（默认 1）清屏重打一次状态 |
+| `jiminit list` | 列出已配置的服务名 |
+| `jiminit service <start\|stop\|restart\|reload> <name>` | 控制单个服务 |
+| `jiminit runlevel` | 显示当前运行级 |
+| `jiminit runlevel <single\|multi-user\|graphical\|1\|3\|5>` | 切换运行级 |
+| `jiminit reboot` | 有序重启 |
+| `jiminit poweroff` | 有序关机 |
+| `jiminit halt` | 有序停止后 halt，不断电 |
+| `jiminit soft-reboot` | 停服务、flush 后 exec 重进 stage2，不重启内核 |
+| `jiminit suspend` | 向 `/sys/power/state` 写 `mem`，唤醒后才返回 |
+| `jiminit hibernate` | 向 `/sys/power/state` 写 `disk`，需要 swap 与 `resume=` |
+| `jiminit metrics` | 以 Prometheus 文本格式输出运行级与服务指标 |
+| `jiminit notify-send <socket> <message>` | 发 sd_notify 数据报（服务脚本内部使用） |
+| `jiminit check` | 校验配置与服务依赖，打印缩进依赖树与启动顺序 |
+| `jiminit graph` | 以 Graphviz DOT 输出服务依赖图（不连接运行中的 init） |
+| `--stage1` / `--stage2` | 强制阶段（内部/调试开关，不是子命令） |
 
-客户端连接 `/run/jiminit.sock`，回复以 `error` 开头时退出码为 1。
+客户端连接 `/run/jiminit.sock`，回复以 `error` 开头时退出码为 1，用法错误为 2。
+`suspend`/`hibernate` 只有机器唤醒后才收到回复，因此客户端对这两个命令不设读超时。
 
 ## 日志格式
 
@@ -147,7 +159,7 @@ name  device  keyfile  options
 - 第一列是相对 jiminit 启动的秒数；软重启会重新计时。
 - 标签为 `[  OK  ]` / `[ INFO ]` / `[ WARN ]` / `[ FAIL ]`，写入 `/dev/kmsg`
   与日志文件时保持纯文本。
-- `color = "auto"` 时只有 stderr/stdout 是终端才输出 ANSI 颜色；`--status`
+- `color = "auto"` 时只有 stderr/stdout 是终端才输出 ANSI 颜色；`status`
   的 running/stopped/failed 也会按同样规则着色。
 
 日志同时写 stderr、`/dev/kmsg` 和 `log_file`；`/dev/kmsg` 由内核加时间戳，

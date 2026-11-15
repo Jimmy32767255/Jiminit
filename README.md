@@ -15,12 +15,15 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
 - **服务监督**：`/etc/jiminit/services.d/*.toml`，依赖拓扑、重启退避、sd_notify
   就绪与看门狗、cgroup v2 资源限制与 OOM 报告、user/group 降权、控制 socket；
   每个服务可用 `log_file` 单独记日志（1 MiB 轮转）。
-- **观测**：`jiminit --status` 查看每个服务的 pid/重启次数/就绪/内存/CPU/pids/io，
-  `jiminit --metrics` 输出 Prometheus 文本。
-- **会话**：为多个 tty 拉起 getty，认证交给外部 `login`；`single`/`multi-user`/
-  `graphical` 运行级可运行时切换；`SIGUSR1` 软重启（exec 自己）。
-- **CLI 体验**：日志带相对时间与 `[  OK  ]`/`[ WARN ]`/`[ FAIL ]` 标签（`color`
-  可配），`jiminit --check` 打印缩进依赖树，`jiminit --graph` 输出 DOT 依赖图。
+- **观测**：`jiminit status [service]` 查看每个服务的 pid/重启次数/就绪/内存/CPU/pids/io，
+  `jiminit metrics` 输出 Prometheus 文本，`jiminit list` 列出服务名。
+- **会话**：为多个 tty 拉起 getty，认证交给外部 `login`；`jiminit runlevel` 查询或切换
+  `single`/`multi-user`/`graphical`。
+- **系统控制**：`jiminit reboot`、`poweroff`、`halt`、`soft-reboot`、`suspend`、
+  `hibernate`，不再需要给 PID 1 发信号。
+- **CLI 体验**：操作都是子命令、选项只做修饰（`status --watch`、`--no-color`），日志带
+  相对时间与 `[  OK  ]`/`[ WARN ]`/`[ FAIL ]` 标签（`color` 可配），`jiminit check`
+  打印缩进依赖树，`jiminit graph` 输出 DOT 依赖图。
 - **dinit 迁移示例**：`contrib/example/services/` 把 dinit 的 bluetoothd、sshd、
   tor、ipfs、i2pd、mihomo、libvirtd、userspawn、zram 等翻译成 jiminit 服务。
 - **可交付**：静态构建脚本、四种 QEMU 冒烟测试、install.sh、PKGBUILD、
@@ -44,8 +47,8 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
 配置自检（不启动任何服务）：
 
 ```sh
-jiminit --check   # 依赖树 + 启动顺序
-jiminit --graph   # Graphviz DOT
+jiminit check   # 依赖树 + 启动顺序
+jiminit graph   # Graphviz DOT
 ```
 
 自动验证：
@@ -66,7 +69,7 @@ jiminit --graph   # Graphviz DOT
 
 ## 项目状态
 
-- 83 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
+- 97 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
   coldplug+真实 fsck 三条冒烟路径各自 PASS。
 - 只在 QEMU x86_64 上验证过；aarch64 只验证了构建路径，未实机测试。
 - 这是个人实验项目，不追求 systemd 兼容，也不适合直接替换生产环境的 init。

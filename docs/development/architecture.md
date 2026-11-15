@@ -6,7 +6,7 @@ jiminit 是单二进制、两阶段的 init：同一个可执行文件既能当 
 
 ## 阶段判定
 
-`main` 先处理一次性客户端命令（`--status` 等），然后：
+`main` 先按子命令处理一次性客户端命令（`status`、`reboot` 等），然后：
 
 1. 显式指定：参数 `--stage1` / `--stage2`，或环境变量 `JIMINIT_STAGE=1|2`；
 2. 自动判断：`/` 是 ramfs/tmpfs（`statfs` 魔数）且 `/proc/cmdline` 里有 `root=`，

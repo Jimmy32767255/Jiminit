@@ -5,13 +5,14 @@
 //!   root and switch_root into it.
 //! * root stage 2 (PID 1 on the final root): hostname, console, getty/login,
 //!   service supervision, runlevel switching, reaping and shutdown.
-//! * a small client (`jiminit --status` / `--runlevel NAME`) that talks to the
-//!   running init over /run/jiminit.sock.
+//! * a small client (`jiminit status`, `jiminit reboot`, `jiminit service
+//!   start NAME`, ...) that talks to the running init over /run/jiminit.sock.
 //!
 //! PID 1 must never exit, so every failure ends up in a rescue shell loop.
 
 mod accounts;
 mod cgroup;
+mod cli;
 mod cmdline;
 mod coldplug;
 mod config;
@@ -21,6 +22,7 @@ mod log;
 mod luks;
 mod modules;
 mod mount;
+mod power;
 mod rootdev;
 mod runlevel;
 mod service;
@@ -41,7 +43,7 @@ enum Stage {
 }
 
 fn main() {
-    if let Some(code) = client().or_else(check).or_else(graph) {
+    if let Some(code) = run_command() {
         std::process::exit(code);
     }
 
@@ -65,41 +67,104 @@ fn main() {
     stage2::rescue();
 }
 
-/// Handle the one-shot client commands. Returns `None` for the init itself.
-fn client() -> Option<i32> {
+/// Run a one-shot client command. Returns `None` when jiminit should start as
+/// the init itself (no arguments, or the internal stage switches).
+fn run_command() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let request = match args
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        ["--status"] => "status".to_string(),
-        ["--metrics"] => "metrics".to_string(),
-        ["--runlevel", level] => format!("runlevel {level}"),
-        ["--service", name, action] => format!("service {name} {action}"),
-        ["--notify-send", path, message] => return Some(notify_send(path, message)),
-        _ => return None,
+    let parsed = match cli::parse(&args) {
+        Ok(None) => return None,
+        Ok(Some(parsed)) => parsed,
+        Err(error) => {
+            eprintln!("jiminit: {error}");
+            eprintln!();
+            eprint!("{}", cli::USAGE);
+            return Some(2);
+        }
     };
+    // A one-shot client should die quietly when the reader of a pipe goes
+    // away, like any other CLI; the init itself keeps ignoring SIGPIPE.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
     log::init();
-    if let Ok(cfg) = config::load(std::path::Path::new(config::DEFAULT_PATH)) {
+    if parsed.no_color {
+        log::set_color(log::Color::Never);
+    } else if let Ok(cfg) = config::load(std::path::Path::new(config::DEFAULT_PATH)) {
         log::set_color(cfg.color_choice());
     }
-    Some(run_client(&request))
+
+    let code = match parsed.command {
+        cli::Command::Help => {
+            print!("{}", cli::USAGE);
+            0
+        }
+        cli::Command::Version => {
+            println!("jiminit {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
+        cli::Command::Check => run_check(),
+        cli::Command::Graph => run_graph(),
+        cli::Command::NotifySend { socket, message } => notify_send(&socket, &message),
+        cli::Command::Status { service, watch } => run_status(service.as_deref(), watch),
+        cli::Command::List => run_client("list", Some(CLIENT_TIMEOUT)),
+        cli::Command::Metrics => run_client("metrics", Some(CLIENT_TIMEOUT)),
+        cli::Command::Service { action, name } => run_client(
+            &format!("service {} {name}", action.as_str()),
+            Some(CLIENT_TIMEOUT),
+        ),
+        cli::Command::Runlevel { target } => match target {
+            Some(level) => run_client(&format!("runlevel {level}"), Some(CLIENT_TIMEOUT)),
+            None => run_client("runlevel", Some(CLIENT_TIMEOUT)),
+        },
+        cli::Command::Power(action) => {
+            // Suspend and hibernate only answer after the machine wakes up.
+            let timeout = if action.answers_after_wake() {
+                None
+            } else {
+                Some(CLIENT_TIMEOUT)
+            };
+            run_client(action.as_str(), timeout)
+        }
+    };
+    Some(code)
+}
+
+/// How long the client waits for the init's reply before giving up.
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// `status [service] [--watch]`: print once, or clear and repeat.
+fn run_status(service: Option<&str>, watch: Option<u64>) -> i32 {
+    let request = match service {
+        Some(name) => format!("status {name}"),
+        None => "status".to_string(),
+    };
+    let mut first = true;
+    loop {
+        if !first {
+            clear_screen();
+        }
+        first = false;
+        let code = run_client(&request, Some(CLIENT_TIMEOUT));
+        let Some(secs) = watch else {
+            return code;
+        };
+        std::thread::sleep(Duration::from_secs(secs));
+    }
+}
+
+fn clear_screen() {
+    if unsafe { libc::isatty(1) } == 1 {
+        print!("\x1b[2J\x1b[H");
+        let _ = std::io::stdout().flush();
+    }
 }
 
 /// Validate the configuration and every service file without starting anything.
-fn check() -> Option<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args != ["--check"] {
-        return None;
-    }
-    log::init();
+fn run_check() -> i32 {
     match check_config() {
-        Ok(()) => Some(0),
+        Ok(()) => 0,
         Err(e) => {
             crate::err!("configuration check failed: {e:#}");
-            Some(1)
+            1
         }
     }
 }
@@ -139,17 +204,12 @@ fn check_config() -> anyhow::Result<()> {
 }
 
 /// Print the service dependency graph as Graphviz DOT.
-fn graph() -> Option<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args != ["--graph"] {
-        return None;
-    }
-    log::init();
+fn run_graph() -> i32 {
     match graph_config() {
-        Ok(()) => Some(0),
+        Ok(()) => 0,
         Err(e) => {
             eprintln!("jiminit: cannot build dependency graph: {e:#}");
-            Some(1)
+            1
         }
     }
 }
@@ -168,7 +228,7 @@ fn graph_config() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_client(request: &str) -> i32 {
+fn run_client(request: &str, read_timeout: Option<Duration>) -> i32 {
     let path = stage2::CONTROL_PATH;
     let mut stream = match UnixStream::connect(path) {
         Ok(stream) => stream,
@@ -177,7 +237,7 @@ fn run_client(request: &str) -> i32 {
             return 1;
         }
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_read_timeout(read_timeout);
 
     if let Err(e) = stream.write_all(request.as_bytes()) {
         eprintln!("jiminit: cannot send to {path}: {e}");
@@ -199,7 +259,7 @@ fn run_client(request: &str) -> i32 {
     }
 }
 
-/// Give `--status` a little color: green running, dim stopped, red failed.
+/// Give `status` a little color: green running, dim stopped, red failed.
 fn colorize_reply(reply: &str) -> String {
     if !log::stdout_colors() {
         return reply.to_string();
@@ -229,7 +289,7 @@ fn colorize_reply(reply: &str) -> String {
     out
 }
 
-/// Send one sd_notify datagram, e.g. `jiminit --notify-send "$NOTIFY_SOCKET" READY=1`.
+/// Send one sd_notify datagram, e.g. `jiminit notify-send "$NOTIFY_SOCKET" READY=1`.
 fn notify_send(path: &str, message: &str) -> i32 {
     let socket = match UnixDatagram::unbound() {
         Ok(socket) => socket,

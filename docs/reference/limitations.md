@@ -60,9 +60,11 @@
 
 - 日志文件只保留一份旧的 `.1`，不压缩、不外发 syslog；文件写失败会静默停用该 sink
   （kmsg/console 仍在）。
-- `--status` 只报内存，不报 CPU/IO 用量；`restarts` 从 stage2 本次启动算起，
-  服务被手动 stop/start 也会计入。
-- 没有 metrics 接口，控制 socket 只支持文本请求。
+- `status` 的 CPU/IO 数值来自 cgroup，只覆盖该服务自己的 cgroup 累计值；`restarts`
+  从 stage2 本次启动算起，服务被手动 stop/start 也会计入。
+- 控制 socket 只支持文本请求；`metrics` 是拉取式的，没有推送。
+- `suspend`/`hibernate` 依赖内核在 `/sys/power/state` 里列出 `mem`/`disk`；hibernate
+  需要可用的 swap 与正确的 `resume=` 内核参数，jiminit 本身不准备这些。
 
 ## 软重启
 

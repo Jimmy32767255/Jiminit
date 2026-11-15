@@ -386,7 +386,7 @@ pub(crate) fn startup_order(services: &[ServiceSpec]) -> (Vec<usize>, Vec<String
     (order, cyclic)
 }
 
-/// Indented dependency overview for `--check`: one line per service, deeper
+/// Indented dependency overview for `check`: one line per service, deeper
 /// dependencies indented by two spaces, with the direct dependencies noted.
 pub(crate) fn tree_lines(services: &[ServiceSpec]) -> Vec<String> {
     let (order, _) = startup_order(services);
@@ -417,7 +417,7 @@ pub(crate) fn tree_lines(services: &[ServiceSpec]) -> Vec<String> {
         .collect()
 }
 
-/// Graphviz DOT description of the dependency graph for `--graph`.
+/// Graphviz DOT description of the dependency graph for `graph`.
 pub(crate) fn dot_graph(services: &[ServiceSpec]) -> String {
     let mut out = String::from("digraph jiminit {\n    rankdir=LR;\n    node [shape=box];\n");
     for spec in services {
@@ -737,51 +737,69 @@ impl Supervisor {
     /// SIGKILL the given service process groups.
     /// Start due restarts and services whose dependencies became ready.
     /// Called from the main loop on every wakeup.
-    /// One human-readable line per service for `jiminit --status`.
+    /// One human-readable line per service for `jiminit status`.
     pub fn status_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        for (idx, spec) in self.services.iter().enumerate() {
-            let running = self.running.iter().find(|(_, run)| run.idx == idx);
-            let restarts = self.starts[idx].saturating_sub(1);
-            let line = match running {
-                Some((pid, run)) => {
-                    let stats = crate::cgroup::stats(&spec.name);
-                    format!(
-                        "{} running pid={} restarts={restarts} ready={} memory={} cpu={} peak={} pids={} io={}",
-                        spec.name,
-                        pid.as_raw(),
-                        if run.ready { "yes" } else { "no" },
-                        stats.memory.map(human_bytes).unwrap_or_else(|| "-".into()),
-                        stats
-                            .cpu_usec
-                            .map(human_duration)
-                            .unwrap_or_else(|| "-".into()),
-                        stats
-                            .memory_peak
-                            .map(human_bytes)
-                            .unwrap_or_else(|| "-".into()),
-                        stats
-                            .pids
-                            .map(|pids| pids.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                        match (stats.io_read, stats.io_write) {
-                            (Some(read), Some(write)) => format!(
-                                "{}/{}",
-                                human_bytes_zero(read),
-                                human_bytes_zero(write)
-                            ),
-                            _ => "-".to_string(),
-                        }
-                    )
-                }
-                None => format!(
-                    "{} stopped pid=- restarts={restarts} ready=- memory=- cpu=- peak=- pids=- io=-",
-                    spec.name
-                ),
-            };
-            lines.push(line);
-        }
-        lines
+        (0..self.services.len())
+            .map(|idx| self.status_line(idx))
+            .collect()
+    }
+
+    /// The status line of one service, for `jiminit status <name>`.
+    pub fn status_line_for(&self, name: &str) -> Result<String> {
+        let idx = self
+            .services
+            .iter()
+            .position(|spec| spec.name == name)
+            .with_context(|| format!("unknown service `{name}`"))?;
+        Ok(self.status_line(idx))
+    }
+
+    /// Configured service names for `jiminit list`.
+    pub fn list_lines(&self) -> Vec<String> {
+        self.services.iter().map(|spec| spec.name.clone()).collect()
+    }
+
+    fn status_line(&self, idx: usize) -> String {
+        let spec = &self.services[idx];
+        let running = self.running.iter().find(|(_, run)| run.idx == idx);
+        let restarts = self.starts[idx].saturating_sub(1);
+        let line = match running {
+            Some((pid, run)) => {
+                let stats = crate::cgroup::stats(&spec.name);
+                format!(
+                    "{} running pid={} restarts={restarts} ready={} memory={} cpu={} peak={} pids={} io={}",
+                    spec.name,
+                    pid.as_raw(),
+                    if run.ready { "yes" } else { "no" },
+                    stats.memory.map(human_bytes).unwrap_or_else(|| "-".into()),
+                    stats
+                        .cpu_usec
+                        .map(human_duration)
+                        .unwrap_or_else(|| "-".into()),
+                    stats
+                        .memory_peak
+                        .map(human_bytes)
+                        .unwrap_or_else(|| "-".into()),
+                    stats
+                        .pids
+                        .map(|pids| pids.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    match (stats.io_read, stats.io_write) {
+                        (Some(read), Some(write)) => format!(
+                            "{}/{}",
+                            human_bytes_zero(read),
+                            human_bytes_zero(write)
+                        ),
+                        _ => "-".to_string(),
+                    }
+                )
+            }
+            None => format!(
+                "{} stopped pid=- restarts={restarts} ready=- memory=- cpu=- peak=- pids=- io=-",
+                spec.name
+            ),
+        };
+        line
     }
 
     /// Prometheus text exposition for all services plus the current runlevel.

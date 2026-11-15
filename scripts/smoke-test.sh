@@ -86,15 +86,15 @@ qpid=$!
 
 # 1. Boot to a getty prompt and log in as root.
 login 1
-printf 'jiminit --status\n' >"$FIFO"
+printf 'jiminit status\n' >"$FIFO"
 wait_for 'status multi-user' 20
 wait_for 'ticker running pid=' 20
 wait_for 'cg running pid=.* memory=[0-9]' 20
 printf 'test -s /var/log/jiminit.log && echo LOGFILE-OK\n' >"$FIFO"
 wait_for 'LOGFILE-OK' 20
-printf 'jiminit --status\n' >"$FIFO"
+printf 'jiminit status\n' >"$FIFO"
 wait_for 'ticker running pid=.* cpu=' 20
-printf 'jiminit --metrics\n' >"$FIFO"
+printf 'jiminit metrics\n' >"$FIFO"
 wait_for 'jiminit_build_info{version="0.1.0"} 1' 20
 wait_for 'jiminit_runlevel_info{runlevel="multi-user"} 1' 20
 wait_for 'jiminit_service_cpu_seconds_total{name="ticker"}' 20
@@ -113,7 +113,7 @@ login 2
 # 3. Switch to single: the login session is stopped and a root shell takes
 #    over the console. The client runs in that dying session, so verify the
 #    switch through the kernel log and the new shell.
-printf 'jiminit --runlevel single &\n' >"$FIFO"
+printf 'jiminit runlevel single &\n' >"$FIFO"
 wait_for 'now in runlevel single' 20
 sleep 1
 printf 'echo SINGLE-SHELL-OK\n' >"$FIFO"
@@ -122,23 +122,23 @@ printf 'cat /var/log/jiminit/logged.log\n' >"$FIFO"
 wait_for 'LOGGED-LINE' 20
 
 # 4. Switch back to multi-user: getty must come back.
-printf 'jiminit --runlevel multi-user &\n' >"$FIFO"
+printf 'jiminit runlevel multi-user &\n' >"$FIFO"
 wait_for 'now in runlevel multi-user' 20
 wait_count 'login:' 3 30
 
 # 5. Log in again and exercise per-service control over the socket.
 login 3
-printf 'jiminit --service after stop\n' >"$FIFO"
+printf 'jiminit service stop after\n' >"$FIFO"
 wait_for 'ok after stopping' 15
 wait_for 'svc/after: stopping on request' 15
-printf 'jiminit --service after start\n' >"$FIFO"
+printf 'jiminit service start after\n' >"$FIFO"
 wait_for 'ok after started' 15
-printf 'jiminit --service after restart\n' >"$FIFO"
+printf 'jiminit service restart after\n' >"$FIFO"
 wait_for 'ok after restarting' 15
 wait_count 'svc/after: started' 2 20
-printf 'jiminit --service notifier reload\n' >"$FIFO"
+printf 'jiminit service reload notifier\n' >"$FIFO"
 wait_for 'ok notifier reloaded' 15
-printf 'jiminit --service parent stop\n' >"$FIFO"
+printf 'jiminit service stop parent\n' >"$FIFO"
 wait_for 'ok parent stopping' 15
 wait_for 'stopping because dependency' 15
 
@@ -181,7 +181,7 @@ grep -q 'fstab: mounted /dev/vdb on /newroot/boot' "$LOG" || fail "a vfat short 
 grep -q 'stage2: starting as pid 1' "$LOG" || fail "stage2 did not start as PID 1"
 grep -q 'hostname set to jiminit-qemu' "$LOG" || fail "config file was not applied"
 grep -q 'started getty on /dev/ttyS0' "$LOG" || fail "getty did not start on the serial console"
-grep -q 'status multi-user' "$LOG" || fail "--status did not report the runlevel"
+grep -q 'status multi-user' "$LOG" || fail "status did not report the runlevel"
 grep -q 'switching runlevel multi-user -> single' "$LOG" || fail "runlevel switch to single did not happen"
 grep -q 'now in runlevel single' "$LOG" || fail "init did not enter the single runlevel"
 grep -q 'SINGLE-SHELL-OK' "$LOG" || fail "single-user shell did not run commands"
@@ -190,8 +190,8 @@ grep -q 'switching runlevel single -> multi-user' "$LOG" || fail "runlevel switc
 grep -q 'now in runlevel multi-user' "$LOG" || fail "init did not return to multi-user"
 grep -q 'uid=0(root)' "$LOG" || fail "login did not give a root shell"
 grep -q 'srw-------' "$LOG" || fail "control socket is not root-only"
-grep -q 'jiminit_service_info{name="ticker",state="running"' "$LOG" || fail "--metrics did not report a running service"
-grep -q 'jiminit_service_memory_bytes{name="cg"}' "$LOG" || fail "--metrics did not report cgroup memory"
+grep -q 'jiminit_service_info{name="ticker",state="running"' "$LOG" || fail "metrics did not report a running service"
+grep -q 'jiminit_service_memory_bytes{name="cg"}' "$LOG" || fail "metrics did not report cgroup memory"
 grep -q 'svc/ticker: tick' "$LOG" || fail "ticker service output was not forwarded"
 grep -q 'svc/failer: restarting' "$LOG" || fail "failed service was not restarted"
 grep -q 'SIGUSR1: soft reboot' "$LOG" || fail "SIGUSR1 did not trigger a soft reboot"

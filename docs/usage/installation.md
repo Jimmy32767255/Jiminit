@@ -22,7 +22,7 @@
 - 创建 `/etc/jiminit/services.d/`，并放一个 `example.toml.disabled`（去掉后缀即启用）。
 
 安装后编辑 `/etc/jiminit.toml` 和服务目录。用 `systemctl` 之类管理不了它：
-jiminit 自身就是 PID 1，控制走 `jiminit --status` 等命令。
+jiminit 自身就是 PID 1，控制走 `jiminit status` 等命令。
 
 ## 直接启动（不用 initramfs）
 

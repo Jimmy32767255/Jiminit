@@ -822,6 +822,9 @@ fn switch_level(
         return;
     }
     crate::info!("switching runlevel {} -> {target}", *level);
+    // Leaving graphical: whatever held the display (the greeter's X server, a
+    // compositor) has to be gone before the console can repaint again.
+    let left_graphical = *level == Level::Graphical && target != Level::Graphical;
 
     // Stop the current login session first: the new shell or getty must be able
     // to claim the console once the old controlling terminal is gone.
@@ -834,6 +837,15 @@ fn switch_level(
     supervisor.set_level(target);
     session_pids.extend(supervisor.stopping_pids());
     wait_for(supervisor, &session_pids, Duration::from_secs(3));
+
+    if left_graphical {
+        // Whatever still owns the display has to go first, otherwise the
+        // console cannot take the framebuffer back.
+        stop_display_holders(supervisor);
+        // Give the text console back before a getty or shell writes to it, and
+        // make it the visible VT: the session ran on its own tty (7/8).
+        restore_text_console(cfg.ttys.first().and_then(|tty| tty_number(tty)));
+    }
 
     supervisor.start_members();
 
@@ -902,6 +914,11 @@ fn wait_for(supervisor: &mut Supervisor, pids: &[Pid], timeout: Duration) {
 
         if Instant::now() >= deadline {
             crate::warn!("processes did not stop for the runlevel change; sending SIGKILL");
+            // Daemonizing services (a display manager, its X server, the
+            // session it spawned) leave the service's process group, so the
+            // group signal below cannot reach them; the cgroup covers the
+            // whole tree.
+            supervisor.kill_foreign();
             for pid in pids {
                 // Login sessions are process groups led by getty/shell.
                 signal_tree(*pid, Signal::SIGKILL);
@@ -934,6 +951,84 @@ fn reap_for(supervisor: &mut Supervisor) {
         }
     }
     supervisor.drain_logs();
+}
+
+/// PIDs that have a DRM device open. A compositor or X server keeps the
+/// display until it closes these, and only the process holding them can leave
+/// the console in a state where nothing repaints.
+fn display_holders() -> Vec<Pid> {
+    let mut holders = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return holders;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid <= 1 {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        let uses_drm = fds.flatten().any(|fd| {
+            std::fs::read_link(fd.path())
+                .map(|target| target.as_os_str().as_bytes().starts_with(b"/dev/dri/"))
+                .unwrap_or(false)
+        });
+        if uses_drm {
+            holders.push(Pid::from_raw(pid));
+        }
+    }
+    holders
+}
+
+/// Terminate whatever still holds the display after the graphical services
+/// were stopped. A Wayland session is usually moved into its own login
+/// session scope, outside the service cgroup, so neither the process group
+/// nor `cgroup.kill` reaches its compositor.
+fn stop_display_holders(supervisor: &mut Supervisor) {
+    let holders = display_holders();
+    if holders.is_empty() {
+        return;
+    }
+    crate::info!(
+        "stopping {} process(es) still holding the display",
+        holders.len()
+    );
+    for pid in &holders {
+        signal_tree(*pid, Signal::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        reap_for(supervisor);
+        if !display_holders().iter().any(|pid| pid_alive(*pid)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let leftover = display_holders();
+    if !leftover.is_empty() {
+        crate::warn!(
+            "{} process(es) still hold the display; sending SIGKILL",
+            leftover.len()
+        );
+        for pid in leftover {
+            signal_tree(pid, Signal::SIGKILL);
+        }
+        let hard = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < hard {
+            reap_for(supervisor);
+            if !display_holders().iter().any(|pid| pid_alive(*pid)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }
 
 // --- shutdown ------------------------------------------------------------
@@ -1067,11 +1162,30 @@ fn live_user_processes() -> usize {
 /// Clear the transient directories and exec a fresh stage 2 in this same PID,
 /// so the whole boot flow (config, services, shell) runs again without asking
 /// the kernel to reboot.
-fn restore_text_console() {
+/// Put the console back into text mode, optionally making `vt` the foreground
+/// virtual terminal first.
+///
+/// A graphical session leaves its VT in `KD_GRAPHICS`, and a compositor that
+/// dies without cleaning up (or is killed) leaves the DRM cursor plane
+/// programmed. The kernel then never repaints text: the screen stays black
+/// with a stale pointer, and switching VTs does nothing because the console
+/// driver never took the display back. `KDSETMODE`/`KD_TEXT` releases fbcon
+/// again, so it has to run after the graphical processes are gone.
+fn restore_text_console(vt: Option<u32>) {
     const KDSETMODE: libc::c_ulong = 0x4B3A;
     const KD_TEXT: libc::c_int = 0x00;
     const KDSKBMODE: libc::c_ulong = 0x4B45;
     const K_UNICODE: libc::c_int = 0x06;
+    const VT_ACTIVATE: libc::c_ulong = 0x5606;
+
+    if let Some(vt) = vt {
+        // Activate before the mode change: both ioctls apply to the VT the
+        // descriptor refers to, and /dev/console follows the active VT.
+        if let Ok(fd) = open("/dev/console", OFlag::O_RDWR, Mode::empty()) {
+            let raw = fd.as_raw_fd();
+            unsafe { libc::ioctl(raw, VT_ACTIVATE, vt as libc::c_int) };
+        }
+    }
 
     let Ok(fd) = open("/dev/console", OFlag::O_RDWR, Mode::empty()) else {
         return;
@@ -1080,12 +1194,17 @@ fn restore_text_console() {
     let text = unsafe { libc::ioctl(raw, KDSETMODE, KD_TEXT) };
     if text == 0 {
         unsafe { libc::ioctl(raw, KDSKBMODE, K_UNICODE) };
-        crate::info!("soft reboot: console restored to text mode");
+        crate::info!("console restored to text mode");
     }
 }
 
+/// Virtual terminal number of a `ttys` entry (`/dev/tty3` -> `3`).
+fn tty_number(path: &str) -> Option<u32> {
+    path.strip_prefix("/dev/tty")?.parse().ok()
+}
+
 fn soft_reboot_exec(cfg: &Config) -> Result<()> {
-    restore_text_console();
+    restore_text_console(None);
     for dir in ["/run", "/tmp"] {
         reset_tmpfs(dir);
     }
@@ -1168,8 +1287,16 @@ fn soft_reboot_env(count: u32) -> Vec<CString> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_soft_reboot_count, respawn_delay};
+    use super::{parse_soft_reboot_count, respawn_delay, tty_number};
     use std::time::Duration;
+
+    #[test]
+    fn vt_number_is_parsed_from_the_console_device() {
+        assert_eq!(tty_number("/dev/tty1"), Some(1));
+        assert_eq!(tty_number("/dev/tty12"), Some(12));
+        assert_eq!(tty_number("/dev/ttyS0"), None);
+        assert_eq!(tty_number("console"), None);
+    }
 
     #[test]
     fn session_respawn_backoff_grows_and_caps() {

@@ -30,11 +30,17 @@ PID 1 自己不占控制终端，getty/shell 各自 `setsid` + `TIOCSCTTY`。
 
 1. 先结束旧会话：切到 single 结束所有 getty，切走 single 结束 console 上的 root shell
    （SIGHUP；交互式 shell 忽略 SIGTERM，所以用 SIGHUP）；
-2. 不属于新级别的服务按逆序 SIGTERM，3s 内没退出就 SIGKILL；
-3. 属于新级别但未运行的服务按依赖启动；
-4. 打开新级别的会话（single 起 root shell，其他级别起 getty）。
+2. 不属于新级别的服务按逆序 SIGTERM，3s 内没退出就 SIGKILL；daemonize 的服务
+   （显示管理器及其 X/Wayland 会话）会逃出服务的进程组，所以超时后按 cgroup 整树杀；
+3. 离开 `graphical` 时还要把显示交回来：先终止仍打开 `/dev/dri/*` 的进程（合成器
+   常被 elogind 移进自己的 session scope，不在服务 cgroup 里），再对控制台
+   `KDSETMODE KD_TEXT` 并把第一个 getty 的 VT 激活。否则屏幕会停在图形模式：
+   黑屏 + 残留鼠标指针，且切 TTY 没有任何反应（内核控制台不再重绘）；
+4. 属于新级别但未运行的服务按依赖启动；
+5. 打开新级别的会话（single 起 root shell，其他级别起 getty）。
 
-日志会看到 `switching runlevel multi-user -> single` 和 `now in runlevel single`。
+日志会看到 `switching runlevel multi-user -> single`、`console restored to text mode`
+和 `now in runlevel single`。
 
 ## 控制 socket
 

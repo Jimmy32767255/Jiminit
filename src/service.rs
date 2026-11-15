@@ -1444,6 +1444,28 @@ impl Supervisor {
         self.pending.clear();
         self.pending_start.clear();
     }
+
+    /// Last resort for a runlevel switch: kill the whole cgroup of every
+    /// service that no longer belongs to the level. A service that daemonizes
+    /// (a display manager and the X server or session it starts) leaves its
+    /// process group, so signalling the tracked pid misses exactly the
+    /// processes that still hold the display.
+    pub fn kill_foreign(&mut self) {
+        let members = self.members();
+        let targets: Vec<usize> = self
+            .running
+            .values()
+            .filter(|run| !members.contains(&run.idx))
+            .map(|run| run.idx)
+            .collect();
+        for idx in targets {
+            crate::warn!(
+                "svc/{}: still running after the runlevel change; killing its cgroup",
+                self.services[idx].name
+            );
+            crate::cgroup::kill(&self.services[idx].name);
+        }
+    }
 }
 
 /// Signal a service process and its process group. Before the child reaches

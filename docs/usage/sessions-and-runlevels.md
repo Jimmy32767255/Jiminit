@@ -68,6 +68,7 @@ jiminit reboot        # 等价于 SIGINT / ctrl-alt-del
 jiminit poweroff      # 等价于 SIGTERM
 jiminit halt          # 停止后 RB_HALT_SYSTEM，不断电
 jiminit soft-reboot   # 等价于 SIGUSR1：flush、重建 /run 与 /tmp、exec 自己
+jiminit kexec         # 停机流程后 RB_KEXEC 进入已加载的内核
 jiminit suspend       # /sys/power/state 写 mem
 jiminit hibernate     # /sys/power/state 写 disk
 ```
@@ -77,6 +78,11 @@ flush 文件系统，再 remount `/` 只读并调用 `reboot(2)`。`suspend`/`hi
 只做一次 `sync` 后写 `/sys/power/state`；客户端会一直等到机器唤醒/恢复，然后打印
 `ok resumed from suspend`。目标状态不受内核支持时（例如没有 swap 时 `disk`）返回
 `error ... (available: ...)`，不会挂起。
+
+`kexec` 复用 reboot 的逐出流程（停会话与服务、flush、remount `/` 只读），只把最后的
+`reboot(2)` 参数换成 `RB_KEXEC`。执行前必须确认 `/sys/kernel/kexec_loaded` 为 `1`
+（即已经用 `kexec -l`/`kexec_file_load` 把新内核读进内存）；否则 PID 1 直接返回
+`error kexec: no kernel image is loaded ...` 并拒绝执行，不会先停掉任何服务。
 
 信号仍然保留作为兜底：SIGTERM 关机、SIGINT（ctrl-alt-del）重启、SIGUSR1 软重启。
 

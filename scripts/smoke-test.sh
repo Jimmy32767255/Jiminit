@@ -94,6 +94,10 @@ printf 'test -s /var/log/jiminit.log && echo LOGFILE-OK\n' >"$FIFO"
 wait_for 'LOGFILE-OK' 20
 printf 'jiminit status\n' >"$FIFO"
 wait_for 'ticker running pid=.* cpu=' 20
+# No kexec image is loaded in the test VM, so the command must refuse to
+# start the shutdown instead of leaving the machine read-only.
+printf 'jiminit kexec\n' >"$FIFO"
+wait_for 'error kexec:' 20
 printf 'jiminit metrics\n' >"$FIFO"
 wait_for 'jiminit_build_info{version="0.1.0"} 1' 20
 wait_for 'jiminit_runlevel_info{runlevel="multi-user"} 1' 20

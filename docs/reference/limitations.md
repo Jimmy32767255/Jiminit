@@ -65,6 +65,8 @@
 - 控制 socket 只支持文本请求；`metrics` 是拉取式的，没有推送。
 - `suspend`/`hibernate` 依赖内核在 `/sys/power/state` 里列出 `mem`/`disk`；hibernate
   需要可用的 swap 与正确的 `resume=` 内核参数，jiminit 本身不准备这些。
+- `kexec` 只负责“检查已加载 + RB_KEXEC”，不调用 `kexec -l`，也不管理 initramfs/命令行；
+  新内核镜像必须事先由 `kexec-tools`（或等价工具）加载好，否则命令会拒绝执行。
 
 ## 软重启
 

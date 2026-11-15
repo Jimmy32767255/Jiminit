@@ -800,11 +800,23 @@ fn handle_client(
                 None,
             ),
         }
+    } else if command == "kexec" {
+        // Refuse before stopping anything: a failed RB_KEXEC would leave the
+        // machine half-shut-down with a read-only root.
+        match crate::power::kexec_loaded() {
+            Ok(true) => ("ok kexec\n".to_string(), Some(Action::Kexec)),
+            Ok(false) => (
+                "error kexec: no kernel image is loaded; run `kexec --load <kernel>` first\n"
+                    .to_string(),
+                None,
+            ),
+            Err(e) => (format!("error kexec: {e:#}\n"), None),
+        }
     } else if let Some(action) = power_action(command) {
         (format!("ok {command}\n"), Some(action))
     } else {
         (
-            "error unknown request (try `status [service]`, `list`, `metrics`, `runlevel [name]`, `service <action> <name>`, `poweroff`, `reboot`, `halt`, `soft-reboot`, `suspend` or `hibernate`)\n"
+            "error unknown request (try `status [service]`, `list`, `metrics`, `runlevel [name]`, `service <action> <name>`, `poweroff`, `reboot`, `halt`, `soft-reboot`, `kexec`, `suspend` or `hibernate`)\n"
                 .to_string(),
             None,
         )
@@ -1093,6 +1105,8 @@ enum Action {
     /// Stop everything, then exec a fresh stage 2 in this same PID instead of
     /// asking the kernel to reboot.
     SoftReboot,
+    /// Reboot into a kernel image that is already loaded in memory.
+    Kexec,
 }
 
 fn shutdown(
@@ -1179,6 +1193,7 @@ fn shutdown(
         Action::PowerOff => nix::sys::reboot::RebootMode::RB_POWER_OFF,
         Action::Halt => nix::sys::reboot::RebootMode::RB_HALT_SYSTEM,
         Action::Reboot => nix::sys::reboot::RebootMode::RB_AUTOBOOT,
+        Action::Kexec => nix::sys::reboot::RebootMode::RB_KEXEC,
         Action::SoftReboot => unreachable!("handled before the reboot syscall"),
     };
     crate::info!("requesting {how:?}");

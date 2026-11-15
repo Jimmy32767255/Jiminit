@@ -43,6 +43,8 @@ pub enum PowerAction {
     PowerOff,
     Halt,
     SoftReboot,
+    /// Reboot into a kernel image that is already loaded in memory.
+    Kexec,
     Suspend,
     Hibernate,
 }
@@ -55,6 +57,7 @@ impl PowerAction {
             PowerAction::PowerOff => "poweroff",
             PowerAction::Halt => "halt",
             PowerAction::SoftReboot => "soft-reboot",
+            PowerAction::Kexec => "kexec",
             PowerAction::Suspend => "suspend",
             PowerAction::Hibernate => "hibernate",
         }
@@ -87,7 +90,8 @@ pub enum Command {
     Runlevel {
         target: Option<String>,
     },
-    /// `reboot`, `poweroff`, `halt`, `soft-reboot`, `suspend`, `hibernate`
+    /// `reboot`, `poweroff`, `halt`, `soft-reboot`, `kexec`, `suspend`,
+    /// `hibernate`
     Power(PowerAction),
     /// `check`
     Check,
@@ -119,6 +123,7 @@ System control:
   poweroff                  power off the machine
   halt                      halt the machine without powering it off
   soft-reboot               re-exec stage 2 without a kernel reboot
+  kexec                     reboot into a kernel image already loaded in memory
   suspend                   suspend to RAM
   hibernate                 hibernate to disk
 
@@ -202,6 +207,7 @@ pub fn parse(args: &[String]) -> Result<Option<Parsed>, String> {
         "poweroff" => power(PowerAction::PowerOff, tail)?,
         "halt" => power(PowerAction::Halt, tail)?,
         "soft-reboot" => power(PowerAction::SoftReboot, tail)?,
+        "kexec" => power(PowerAction::Kexec, tail)?,
         "suspend" => power(PowerAction::Suspend, tail)?,
         "hibernate" => power(PowerAction::Hibernate, tail)?,
         "check" => {
@@ -470,6 +476,7 @@ mod tests {
     #[test]
     fn power_actions_map_to_protocol_verbs() {
         assert_eq!(PowerAction::SoftReboot.as_str(), "soft-reboot");
+        assert_eq!(PowerAction::Kexec.as_str(), "kexec");
         assert!(PowerAction::Suspend.answers_after_wake());
         assert!(!PowerAction::Reboot.answers_after_wake());
     }

@@ -134,6 +134,7 @@ name  device  keyfile  options
 | `jiminit poweroff` | 有序关机 |
 | `jiminit halt` | 有序停止后 halt，不断电 |
 | `jiminit soft-reboot` | 停服务、flush 后 exec 重进 stage2，不重启内核 |
+| `jiminit kexec` | 走与 reboot 相同的收敛流程，最后以 `RB_KEXEC` 进入内存中已加载的内核；`/sys/kernel/kexec_loaded` 不为 1 时拒绝执行 |
 | `jiminit suspend` | 向 `/sys/power/state` 写 `mem`，唤醒后才返回 |
 | `jiminit hibernate` | 向 `/sys/power/state` 写 `disk`，需要 swap 与 `resume=` |
 | `jiminit metrics` | 以 Prometheus 文本格式输出运行级与服务指标 |

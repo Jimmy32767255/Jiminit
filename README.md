@@ -19,8 +19,8 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
   `jiminit metrics` 输出 Prometheus 文本，`jiminit list` 列出服务名。
 - **会话**：为多个 tty 拉起 getty，认证交给外部 `login`；`jiminit runlevel` 查询或切换
   `single`/`multi-user`/`graphical`。
-- **系统控制**：`jiminit reboot`、`poweroff`、`halt`、`soft-reboot`、`suspend`、
-  `hibernate`，不再需要给 PID 1 发信号。
+- **系统控制**：`jiminit reboot`、`poweroff`、`halt`、`soft-reboot`、`kexec`、
+  `suspend`、`hibernate`，不再需要给 PID 1 发信号。
 - **CLI 体验**：操作都是子命令、选项只做修饰（`status --watch`、`--no-color`），日志带
   相对时间与 `[  OK  ]`/`[ WARN ]`/`[ FAIL ]` 标签（`color` 可配），`jiminit check`
   打印缩进依赖树，`jiminit graph` 输出 DOT 依赖图。
@@ -69,7 +69,7 @@ jiminit graph   # Graphviz DOT
 
 ## 项目状态
 
-- 97 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
+- 99 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
   coldplug+真实 fsck 三条冒烟路径各自 PASS。
 - 只在 QEMU x86_64 上验证过；aarch64 只验证了构建路径，未实机测试。
 - 这是个人实验项目，不追求 systemd 兼容，也不适合直接替换生产环境的 init。

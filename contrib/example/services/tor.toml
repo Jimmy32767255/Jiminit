@@ -1,0 +1,5 @@
+# migrated from /etc/dinit.d/tor
+exec = "/usr/bin/tor"
+args = ["--runasdaemon", "0"]
+restart = "always"
+log_file = "/var/log/jiminit/tor.log"

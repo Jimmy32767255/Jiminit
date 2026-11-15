@@ -1,0 +1,8 @@
+# migrated from /etc/dinit.d/bluetoothd (dbus-wait-for's readiness fd is
+# dinit-specific, so wait for the system bus ourselves)
+exec = "/bin/sh"
+args = ["-c", "i=0; while [ $i -lt 50 ]; do /usr/bin/dbus-send --system --dest=org.freedesktop.DBus --type=method_call /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1 && break; /usr/bin/sleep 0.2; i=$((i+1)); done; exec /usr/lib/bluetooth/bluetoothd"]
+depends_on = ["dbus", "udev-trigger"]
+restart = "always"
+log_file = "/var/log/jiminit/bluetoothd.log"
+env = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/bin" }

@@ -1,0 +1,8 @@
+# migrated from /etc/dinit.d/zram (scripted; jiminit has no stop hooks, the
+# swap device is torn down by the kernel at shutdown anyway)
+exec = "/usr/local/bin/zram-swap"
+args = ["start"]
+depends_on = ["udev-trigger"]
+oneshot = true
+restart = "never"
+log_file = "/var/log/jiminit/zram.log"

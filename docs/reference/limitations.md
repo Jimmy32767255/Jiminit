@@ -15,7 +15,7 @@
 - `/usr` 不会自动探测和挂载：必须写进 `/etc/fstab`，否则 `init_path` 指向
   `/usr/...` 时会明确报错。
 - 没有 initramfs 的 `systemd` 兼容层，也没有 resume/hibernate 处理；udev 不是内置的，
-  可以把 `udevd` 当普通服务拉起（`contrib/host` 有示例），但 stage1 不使用 udev。
+  可以把 `udevd` 当普通服务拉起（`contrib/example` 有示例），但 stage1 不使用 udev。
 
 ## 根设备与存储
 

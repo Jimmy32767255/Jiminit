@@ -1,0 +1,5 @@
+# migrated from /etc/dinit.d/mihomo
+exec = "/usr/bin/mihomo"
+args = ["-d", "/etc/mihomo"]
+restart = "always"
+log_file = "/var/log/jiminit/mihomo.log"

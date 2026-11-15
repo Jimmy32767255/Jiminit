@@ -1,0 +1,6 @@
+exec = "/bin/sh"
+args = ["-c", "i=0; while [ $i -lt 100 ]; do /usr/bin/dbus-send --system --dest=org.freedesktop.DBus --type=method_call /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1 && break; /usr/bin/sleep 0.2; i=$((i+1)); done; exec /usr/bin/NetworkManager -n"]
+depends_on = ["dbus"]
+restart = "always"
+runlevels = ["multi-user", "graphical"]
+env = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/bin" }

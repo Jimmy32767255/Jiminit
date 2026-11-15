@@ -1,0 +1,5 @@
+exec = "/bin/sh"
+args = ["-c", "/usr/bin/install -dm755 -o 81 -g 81 /run/dbus; exec /usr/bin/dbus-daemon --system --nofork --nopidfile"]
+restart = "always"
+runlevels = ["multi-user", "graphical"]
+env = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/bin" }

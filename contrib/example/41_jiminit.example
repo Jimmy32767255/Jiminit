@@ -1,0 +1,32 @@
+#!/bin/sh
+exec tail -n +3 "$0"
+# Template for /etc/grub.d/41_jiminit: experimental jiminit boot entries in a
+# dedicated submenu, leaving the default entries untouched so a failed test can
+# be rolled back from the GRUB menu.
+#
+# Replace the placeholders with your own values:
+#   <luks-uuid>     cryptsetup luksUUID /dev/...
+#   <boot-fs-uuid>  blkid -s UUID -o value /dev/...  (the /boot filesystem)
+#
+# Each installed kernel needs its own initramfs because mkinitcpio embeds
+# modules built for one exact kernel version. Duplicate the menuentry below
+# once per kernel (/boot/initramfs-jiminit-<pkgbase>.img).
+submenu "Jiminit (experimental)" --class gnu-linux --class os {
+	menuentry "Jiminit (linux)" --class gnu-linux --class os {
+		load_video
+		set gfxpayload=keep
+		insmod gzio
+		insmod part_gpt
+		insmod lvm
+		insmod cryptodisk
+		insmod luks2
+		insmod ext2
+		cryptomount -u <luks-uuid-without-dashes>
+		set root='cryptouuid/<luks-uuid-without-dashes>'
+		search --no-floppy --fs-uuid --set=root <boot-fs-uuid>
+		echo	'Loading Jiminit linux kernel ...'
+		linux	/boot/vmlinuz-linux root=/dev/mapper/cryptRoot rw crypttab=/etc/jiminit/crypttab console=tty0 loglevel=4
+		echo	'Loading Jiminit linux initramfs ...'
+		initrd	/boot/initramfs-jiminit-linux.img
+	}
+}

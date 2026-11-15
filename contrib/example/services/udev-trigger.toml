@@ -1,0 +1,6 @@
+exec = "/usr/lib/dinit/udev-trigger"
+oneshot = true
+restart = "never"
+depends_on = ["udev"]
+runlevels = ["multi-user", "graphical"]
+env = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/bin" }

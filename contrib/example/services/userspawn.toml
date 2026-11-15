@@ -1,0 +1,6 @@
+# migrated from /etc/dinit.d/userspawn: starts a user-level dinit per login,
+# which is what brings up user services such as pipewire.
+exec = "/usr/bin/userspawn"
+depends_on = ["dbus", "elogind"]
+restart = "always"
+log_file = "/var/log/jiminit/userspawn.log"

@@ -1,0 +1,5 @@
+# migrated from /etc/dinit.d/dmeventd (LVM thin-pool/snapshot monitoring)
+exec = "/usr/bin/dmeventd"
+args = ["-f"]
+restart = "always"
+log_file = "/var/log/jiminit/dmeventd.log"

@@ -1,0 +1,6 @@
+# migrated from /etc/dinit.d/i2pd
+exec = "/usr/bin/i2pd"
+args = ["--conf=/etc/i2pd/i2pd.conf", "--service"]
+user = "i2pd"
+restart = "always"
+log_file = "/var/log/jiminit/i2pd.log"

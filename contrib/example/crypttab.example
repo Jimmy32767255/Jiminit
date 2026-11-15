@@ -1,0 +1,10 @@
+# Template for /etc/jiminit/crypttab, read by jiminit stage 1.
+#
+# Fields: <name> <device> <keyfile> <options>
+#   name     mapper name, used as /dev/mapper/<name>
+#   device   UUID=<luks-uuid>, PARTUUID=... or /dev/...
+#   keyfile  a key file path, or "none" to prompt
+#
+# Replace the placeholder UUIDs with the output of `cryptsetup luksUUID`.
+cryptRoot UUID=<root-luks-uuid> none luks
+cryptHome UUID=<home-luks-uuid> /etc/luks/home.key luks,noearly

@@ -1,0 +1,6 @@
+# migrated from /etc/dinit.d/ssh-keygen (scripted)
+exec = "/usr/bin/ssh-keygen"
+args = ["-A"]
+oneshot = true
+restart = "never"
+log_file = "/var/log/jiminit/ssh-keygen.log"

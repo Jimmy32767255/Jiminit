@@ -1,0 +1,4 @@
+# dependency of libvirtd
+exec = "/usr/bin/virtlockd"
+restart = "always"
+log_file = "/var/log/jiminit/virtlockd.log"

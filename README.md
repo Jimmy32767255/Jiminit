@@ -21,7 +21,7 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
   `graphical` 运行级可运行时切换；`SIGUSR1` 软重启（exec 自己）。
 - **CLI 体验**：日志带相对时间与 `[  OK  ]`/`[ WARN ]`/`[ FAIL ]` 标签（`color`
   可配），`jiminit --check` 打印缩进依赖树，`jiminit --graph` 输出 DOT 依赖图。
-- **dinit 迁移示例**：`contrib/host/services/` 把本机 dinit 的 bluetoothd、sshd、
+- **dinit 迁移示例**：`contrib/example/services/` 把 dinit 的 bluetoothd、sshd、
   tor、ipfs、i2pd、mihomo、libvirtd、userspawn、zram 等翻译成 jiminit 服务。
 - **可交付**：静态构建脚本、四种 QEMU 冒烟测试、install.sh、PKGBUILD、
   mkinitcpio hook、aarch64 构建路径。

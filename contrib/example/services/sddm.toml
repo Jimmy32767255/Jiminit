@@ -1,0 +1,6 @@
+exec = "/bin/sh"
+args = ["-c", "i=0; while [ $i -lt 100 ]; do /usr/bin/dbus-send --system --dest=org.freedesktop.login1 --type=method_call /org/freedesktop/login1 org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 && break; /usr/bin/sleep 0.2; i=$((i+1)); done; /usr/bin/install -dm0755 -o sddm -g sddm /var/lib/sddm /run/sddm; /usr/bin/sddm; while /usr/bin/pgrep -x sddm >/dev/null 2>&1; do /usr/bin/sleep 5; done"]
+depends_on = ["dbus", "elogind", "udev-trigger"]
+restart = "always"
+runlevels = ["graphical"]
+env = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/bin" }

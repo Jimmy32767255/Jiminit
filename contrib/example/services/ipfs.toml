@@ -1,0 +1,7 @@
+# migrated from /etc/dinit.d/ipfs (replace user and paths with your own)
+exec = "/usr/bin/ipfs"
+args = ["daemon", "--enable-gc", "--enable-pubsub-experiment"]
+user = "ipfs"
+env = { HOME = "/var/lib/ipfs", IPFS_PATH = "/var/lib/ipfs/.ipfs" }
+restart = "always"
+log_file = "/var/log/jiminit/ipfs.log"

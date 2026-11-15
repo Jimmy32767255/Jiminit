@@ -1,0 +1,4 @@
+exec = "/usr/bin/udevd"
+restart = "always"
+runlevels = ["multi-user", "graphical"]
+env = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/bin" }

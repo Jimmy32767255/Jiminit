@@ -1,0 +1,5 @@
+# migrated from /etc/dinit.d/libvirtd
+exec = "/usr/bin/libvirtd"
+depends_on = ["dbus", "virtlogd", "virtlockd"]
+restart = "always"
+log_file = "/var/log/jiminit/libvirtd.log"

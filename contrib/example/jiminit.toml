@@ -1,0 +1,26 @@
+# Example hardware profile: a desktop machine with LUKS/LVM root, a private
+# /home container, getty on tty1-6 and KDE Plasma over SDDM.
+#
+# Copy to /etc/jiminit.toml and adjust every value that names your hardware,
+# users or paths. `jiminit --check` validates the result without starting
+# anything.
+hostname = "example-host"
+console = "/dev/console"
+shell = "/bin/bash"
+respawn = true
+shutdown_timeout_ms = 10000
+init_path = "/sbin/jiminit"
+services_dir = "/etc/jiminit/services.d"
+default_runlevel = "graphical"
+getty = "/sbin/agetty"
+getty_baud = "38400"
+serial_getty_baud = "115200"
+getty_baud_first = false
+getty_tty_basename = true
+ttys = ["/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4", "/dev/tty5", "/dev/tty6"]
+serial_ttys = []
+log_file = "/var/log/jiminit.log"
+# auto = only on terminals, always, never
+color = "auto"
+cgroup = true
+ready_timeout_ms = 5000

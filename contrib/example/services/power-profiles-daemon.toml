@@ -1,0 +1,6 @@
+# migrated from /etc/dinit.d/power-profiles-daemon
+exec = "/usr/lib/power-profiles-daemon"
+args = ["-v"]
+depends_on = ["dbus"]
+restart = "always"
+log_file = "/var/log/jiminit/power-profiles-daemon.log"

@@ -1,0 +1,8 @@
+# migrated from /etc/dinit.d/sshd; dinit's sshd service has no RuntimeDirectory,
+# so create the privsep dir here (sshd refuses to start without it)
+exec = "/bin/sh"
+args = ["-c", "/usr/bin/install -dm0755 -o root -g root /run/sshd; exec /usr/bin/sshd -D"]
+depends_on = ["ssh-keygen"]
+restart = "always"
+log_file = "/var/log/jiminit/sshd.log"
+env = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/bin" }

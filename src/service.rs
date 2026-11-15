@@ -1993,9 +1993,9 @@ oneshot = true
         assert_eq!(human_bytes(0), "-");
     }
     #[test]
-    fn host_profile_services_parse_and_are_acyclic() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("contrib/host/services");
-        let services = load_dir(&dir).expect("host service files");
+    fn example_services_parse_and_are_acyclic() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("contrib/example/services");
+        let services = load_dir(&dir).expect("example service files");
         assert!(services.len() >= 20, "only {} services", services.len());
         let (order, cyclic) = startup_order(&services);
         assert!(cyclic.is_empty(), "dependency cycle: {cyclic:?}");

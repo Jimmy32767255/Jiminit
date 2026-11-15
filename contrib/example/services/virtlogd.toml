@@ -1,0 +1,5 @@
+# dependency of libvirtd
+exec = "/usr/bin/virtlogd"
+depends_on = ["dbus"]
+restart = "always"
+log_file = "/var/log/jiminit/virtlogd.log"

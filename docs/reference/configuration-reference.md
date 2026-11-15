@@ -28,6 +28,12 @@
 
 配置模板见 `contrib/jiminit.toml`。
 
+## 内核命令行
+
+| 参数 | 作用 |
+| --- | --- |
+| `jiminit.runlevel=<single\|multi-user\|graphical\|1\|3\|5>` | 指定本次启动的运行级，优先级高于 `default_runlevel`；值非法时告警并回落 |
+
 ## 服务文件 `/etc/jiminit/services.d/<name>.toml`
 
 `exec` 必填，其余可省略；未知键使该服务解析失败（启动时告警并跳过）。

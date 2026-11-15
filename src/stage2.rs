@@ -3,6 +3,7 @@
 //! runlevel), reaps orphans, switches runlevels on request and performs an
 //! orderly shutdown/reboot/soft-reboot.
 
+use crate::cmdline::Cmdline;
 use crate::config::Config;
 use crate::runlevel::Level;
 use crate::service::Supervisor;
@@ -79,7 +80,7 @@ pub fn run() -> Result<()> {
         crate::info!("soft reboot #{n}: running stage2 again");
     }
 
-    let mut level = parse_default_level(&cfg);
+    let mut level = initial_level(&cfg);
     set_hostname(&cfg.hostname);
     setup_console(&cfg.console);
     let signals = block_signals()?;
@@ -323,13 +324,41 @@ pub fn run() -> Result<()> {
     }
 }
 
-fn parse_default_level(cfg: &Config) -> Level {
-    match Level::parse(&cfg.default_runlevel) {
+/// The runlevel to start in. The `jiminit.runlevel=` kernel parameter wins
+/// over `default_runlevel` from the configuration, so a rescue boot needs no
+/// edit of `/etc/jiminit.toml`.
+fn initial_level(cfg: &Config) -> Level {
+    let requested = std::fs::read_to_string("/proc/cmdline")
+        .ok()
+        .and_then(|raw| {
+            Cmdline::parse(&raw)
+                .value("jiminit.runlevel")
+                .map(str::to_string)
+        });
+    choose_level(requested.as_deref(), &cfg.default_runlevel)
+}
+
+fn choose_level(requested: Option<&str>, configured: &str) -> Level {
+    if let Some(value) = requested {
+        match Level::parse(value) {
+            Some(level) => {
+                crate::info!(
+                    "kernel parameter jiminit.runlevel={value}: starting in {level} \
+                     (overrides default_runlevel)"
+                );
+                return level;
+            }
+            None => crate::warn!(
+                "unknown jiminit.runlevel `{value}` on the kernel command line; \
+                 falling back to default_runlevel"
+            ),
+        }
+    }
+    match Level::parse(configured) {
         Some(level) => level,
         None => {
             crate::warn!(
-                "unknown default_runlevel `{}`; using {}",
-                cfg.default_runlevel,
+                "unknown default_runlevel `{configured}`; using {}",
                 Level::DEFAULT
             );
             Level::DEFAULT
@@ -1356,8 +1385,28 @@ fn soft_reboot_env(count: u32) -> Vec<CString> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_soft_reboot_count, respawn_delay, tty_number};
+    use super::{choose_level, parse_soft_reboot_count, respawn_delay, tty_number};
     use std::time::Duration;
+
+    #[test]
+    fn kernel_parameter_overrides_the_configured_runlevel() {
+        use crate::runlevel::Level;
+        assert_eq!(choose_level(Some("single"), "graphical"), Level::Single);
+        assert_eq!(choose_level(Some("3"), "single"), Level::MultiUser);
+        assert_eq!(
+            choose_level(Some("graphical"), "multi-user"),
+            Level::Graphical
+        );
+    }
+
+    #[test]
+    fn invalid_or_missing_kernel_parameter_falls_back_to_the_config() {
+        use crate::runlevel::Level;
+        assert_eq!(choose_level(None, "graphical"), Level::Graphical);
+        assert_eq!(choose_level(Some(""), "single"), Level::Single);
+        assert_eq!(choose_level(Some("rescue"), "multi-user"), Level::MultiUser);
+        assert_eq!(choose_level(None, "nonsense"), Level::DEFAULT);
+    }
 
     #[test]
     fn vt_number_is_parsed_from_the_console_device() {

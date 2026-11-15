@@ -23,6 +23,10 @@ PID 1 自己不占控制终端，getty/shell 各自 `setsid` + `TIOCSCTTY`。
 | `multi-user` | 3 | 默认级；未标 `runlevels` 的服务都算；getty 提供登录 |
 | `graphical` | 5 | 同 multi-user，加上标了 `graphical` 的服务；jiminit 不启动图形界面 |
 
+启动级别默认取配置里的 `default_runlevel`；如果内核命令行带了
+`jiminit.runlevel=<级别>`，就以它为准（优先级更高，适合临时进单用户救援）。
+参数值无法识别时会告警并回落到 `default_runlevel`。
+
 服务未标 `runlevels` 等价于 `["multi-user", "graphical"]`。显式标 `single` 的服务
 同时也会自动把它的依赖拉进 single 级。
 

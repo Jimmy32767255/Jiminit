@@ -71,7 +71,7 @@ getty_tty_basename = true
 以状态 1 立即退出。
 - `respawn`：single 级 root shell 退出后是否重新拉起。
 - `default_runlevel`：启动进入的级别，接受 `single`/`multi-user`/`graphical`
-  和 `1`/`3`/`5`。
+  和 `1`/`3`/`5`；可被内核参数 `jiminit.runlevel=` 覆盖（见下节）。
 
 ### 服务
 
@@ -91,6 +91,21 @@ getty_tty_basename = true
 
 - `init_path`：stage2 在自己根上的路径，默认 `/sbin/jiminit`。独立 `/usr` 布局改成
   `/usr/sbin/jiminit`，并确认 `/usr` 已由 fstab 挂载，否则 stage1 会给出明确错误。
+
+## 内核命令行覆盖
+
+启动时给内核命令行加 `jiminit.runlevel=<级别>`，本次启动就进入该级别，优先级高于
+`default_runlevel`，不需要改配置文件（适合临时进单用户修系统）：
+
+```text
+jiminit.runlevel=single
+```
+
+接受与 `default_runlevel` 相同的写法（`single`/`multi-user`/`graphical` 或 `1`/`3`/`5`）。
+值为空或无法识别时会告警并回落到 `default_runlevel`；`default_runlevel` 本身也无法
+识别时用内置默认值 `multi-user`。命令行里重复出现时以最后一个为准，与内核处理重复
+参数的方式一致。这个参数只影响本次启动，软重启（`jiminit soft-reboot`）会继续沿用
+（`/proc/cmdline` 不变）。
 
 ## 常见改法
 

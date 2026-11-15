@@ -25,4 +25,6 @@ rustc-ice-*.txt
 
 # QEMU test artifacts
 /out/
+# AI/Agent
+.trae/
 .dsh/

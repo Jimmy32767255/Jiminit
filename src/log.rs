@@ -365,14 +365,31 @@ log_fn!(error, Level::Error);
 log_fn!(crit, Level::Critical);
 
 /// Log one static `[ WAIT ]` line for an asynchronous wait (no animation).
-pub fn wait_notice(label: &str, limit: Duration) {
+pub fn wait_notice(label: &str, limit: Option<Duration>) {
     write_record(
         TAG_WAIT,
         ANSI_WAIT,
         6,
         Level::Info,
-        &format!("{label} (timeout {}s)", limit.as_secs()),
+        &format!("{label} (timeout {})", format_limit(limit)),
     );
+}
+
+/// `[ WAIT ] <frame> 2s/3s label`: the character after the tag is the
+/// spinning frame itself and doubles as the `-` placeholder.
+fn wait_line(stamp: &str, frame: char, elapsed: Duration, limit: &str, label: &str) -> String {
+    format!(
+        "{stamp} {TAG_WAIT} {frame} {}s/{limit} {label}",
+        elapsed.as_secs()
+    )
+}
+
+/// `3s` for a bounded wait, `inf` when there is no timeout.
+fn format_limit(limit: Option<Duration>) -> String {
+    match limit {
+        Some(limit) => format!("{}s", limit.as_secs()),
+        None => "inf".to_string(),
+    }
 }
 
 /// A bounded wait: `[ WAIT ] - 0s/3s label` with a spinner on a terminal.
@@ -383,7 +400,8 @@ pub fn wait_notice(label: &str, limit: Duration) {
 /// logged (and also recorded in kmsg/the log file) once the grace passed.
 pub struct Wait {
     label: String,
-    limit: Duration,
+    /// `None` means no upper bound; the line then shows `0s/inf`.
+    limit: Option<Duration>,
     started: Instant,
     last_draw: Instant,
     frame: usize,
@@ -397,7 +415,8 @@ pub struct Wait {
 }
 
 impl Wait {
-    pub fn start(label: impl Into<String>, limit: Duration) -> Self {
+    /// `limit: None` starts an unbounded wait (rendered as `0s/inf`).
+    pub fn start(label: impl Into<String>, limit: Option<Duration>) -> Self {
         let tty = stderr_is_tty();
         Self {
             label: label.into(),
@@ -442,23 +461,26 @@ impl Wait {
     }
 
     fn draw(&mut self) {
+        // The character right after the tag is the animation frame itself;
+        // it also serves as the placeholder in `[ WAIT ] - 0s/3s label`.
         let spin = SPINNER[self.frame % SPINNER.len()];
         self.frame += 1;
         self.last_draw = Instant::now();
         let stamp = stamp();
-        let line = format!(
-            "{stamp} {TAG_WAIT} - {}s/{}s {} {spin}",
-            self.started.elapsed().as_secs(),
-            self.limit.as_secs(),
-            self.label
+        let limit = format_limit(self.limit);
+        let line = wait_line(
+            &stamp,
+            spin,
+            self.started.elapsed(),
+            limit.as_str(),
+            &self.label,
         );
         let mut out = String::with_capacity(line.len() + 24);
         out.push_str("\r\x1b[2K");
         if log_colors() {
             out.push_str(&format!(
-                "\x1b[{ANSI_DIM}m{stamp}\x1b[0m \x1b[{ANSI_WAIT}m{TAG_WAIT}\x1b[0m - {}s/{}s {} {spin}",
+                "\x1b[{ANSI_DIM}m{stamp}\x1b[0m \x1b[{ANSI_WAIT}m{TAG_WAIT}\x1b[0m {spin} {}s/{limit} {}",
                 self.started.elapsed().as_secs(),
-                self.limit.as_secs(),
                 self.label
             ));
         } else {
@@ -599,10 +621,36 @@ mod tests {
     }
 
     #[test]
+    fn wait_line_puts_the_frame_right_after_the_tag() {
+        let line = wait_line(
+            "[    2.000]",
+            '/',
+            Duration::from_secs(2),
+            "3s",
+            "stopping sessions",
+        );
+        assert_eq!(line, "[    2.000] [ WAIT ] / 2s/3s stopping sessions");
+        let line = wait_line(
+            "[    2.000]",
+            '-',
+            Duration::from_secs(2),
+            "inf",
+            "waiting forever",
+        );
+        assert!(line.contains("2s/inf waiting forever"), "{line}");
+    }
+
+    #[test]
+    fn formats_wait_limits() {
+        assert_eq!(format_limit(Some(Duration::from_secs(3))), "3s");
+        assert_eq!(format_limit(None), "inf");
+    }
+
+    #[test]
     fn wait_renders_without_a_terminal() {
         // The test harness has no tty on stderr, so this exercises the static
         // path and must not panic.
-        let wait = Wait::start("test wait", Duration::from_secs(3));
+        let wait = Wait::start("test wait", Some(Duration::from_secs(3)));
         assert!(!wait.tty);
         drop(wait);
     }

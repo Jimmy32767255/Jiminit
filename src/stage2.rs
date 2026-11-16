@@ -994,7 +994,10 @@ fn pid_alive(pid: Pid) -> bool {
 /// supervisor, sessions through the kernel's liveness check), killing the
 /// stragglers after `timeout`.
 fn wait_for(supervisor: &mut Supervisor, pids: &[Pid], timeout: Duration) {
-    let mut wait = crate::log::Wait::start(format!("stopping {} process(es)", pids.len()), timeout);
+    let mut wait = crate::log::Wait::start(
+        format!("stopping {} process(es)", pids.len()),
+        Some(timeout),
+    );
     let deadline = Instant::now() + timeout;
     loop {
         wait.tick();
@@ -1101,7 +1104,7 @@ fn stop_display_holders(supervisor: &mut Supervisor) {
     }
     let mut wait = crate::log::Wait::start(
         "waiting for the display to be released",
-        Duration::from_secs(2),
+        Some(Duration::from_secs(2)),
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
@@ -1177,7 +1180,7 @@ fn shutdown(
     // Phase 2: SIGKILL whatever is left, then wait a little longer.
     let mut wait = crate::log::Wait::start(
         "stopping sessions and services",
-        Duration::from_millis(cfg.shutdown_timeout_ms),
+        Some(Duration::from_millis(cfg.shutdown_timeout_ms)),
     );
     let deadline = Instant::now() + Duration::from_millis(cfg.shutdown_timeout_ms);
     let mut hard_deadline: Option<Instant> = None;

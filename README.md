@@ -23,7 +23,7 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
   `suspend`、`hibernate`，不再需要给 PID 1 发信号。
 - **日志**：10 级标签（`[ SUCC ]`、`[ INFO ]`、`[ MESG ]`、`[ WARN ]`、`[ERR OR]`、
   `[ FAIL ]`、`[CRITIC]`、`[DE BUG]`、`[TRACE ]`、`[ WAIT ]`）与标准亮色，`log_level`
-  可调阈值；有上限的等待在终端显示 `- 0s/3s` 计时与转圈动画，`color` 可配。
+  可调阈值；有上限的等待在终端显示 `<帧> 0s/3s` 计时与转圈动画（无上限显示 `0s/inf`），`color` 可配。
 - **CLI 体验**：操作都是子命令、选项只做修饰（`status --watch`、`--no-color`），
   `jiminit check` 打印缩进依赖树，`jiminit graph` 输出 DOT 依赖图。
 - **dinit 迁移示例**：`contrib/example/services/` 把 dinit 的 bluetoothd、sshd、
@@ -71,7 +71,7 @@ jiminit graph   # Graphviz DOT
 
 ## 项目状态
 
-- 106 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
+- 108 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
   coldplug+真实 fsck 三条冒烟路径各自 PASS。
 - 只在 QEMU x86_64 上验证过；aarch64 只验证了构建路径，未实机测试。
 - 这是个人实验项目，不追求 systemd 兼容，也不适合直接替换生产环境的 init。

@@ -201,7 +201,7 @@ fn run_install(command: &str, target: &str) -> Result<()> {
 fn run_with_timeout(mut command: std::process::Command) -> Result<ExitStatus> {
     let label = format!("waiting for {}", command.get_program().to_string_lossy());
     let mut child = command.spawn().context("spawn helper")?;
-    let mut wait = crate::log::Wait::start(label, COMMAND_TIMEOUT);
+    let mut wait = crate::log::Wait::start(label, Some(COMMAND_TIMEOUT));
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     loop {
         wait.tick();

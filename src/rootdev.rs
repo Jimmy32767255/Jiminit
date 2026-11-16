@@ -51,7 +51,7 @@ pub fn resolve_with_retry(spec: &str, attempts: usize, interval: Duration) -> Re
     let window = interval.saturating_mul(attempts as u32);
     // Short retries are not worth a progress line; a missing root device is.
     let mut wait = (window >= Duration::from_secs(1))
-        .then(|| crate::log::Wait::start(format!("waiting for {spec}"), window));
+        .then(|| crate::log::Wait::start(format!("waiting for {spec}"), Some(window)));
     let mut last_err = None;
     for attempt in 0..attempts {
         match resolve(spec) {

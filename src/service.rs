@@ -1270,7 +1270,7 @@ impl Supervisor {
                     if spec.notify {
                         crate::log::wait_notice(
                             &format!("svc/{}: waiting for READY=1 on {path}", spec.name),
-                            self.ready_timeout,
+                            Some(self.ready_timeout),
                         );
                     }
                     if let Some(watchdog) = spec.watchdog {

@@ -19,6 +19,8 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
   `jiminit metrics` 输出 Prometheus 文本，`jiminit list` 列出服务名。
 - **会话**：为多个 tty 拉起 getty，认证交给外部 `login`；`jiminit runlevel` 查询或切换
   `single`/`multi-user`/`graphical`，内核参数 `jiminit.runlevel=` 可在启动时覆盖配置。
+- **用户实例**：`jiminit userspawn` 监视 `/run/user/<uid>`，为每个登录会话启动
+  `jiminit --user` 监督 `~/.config/jiminit/services.d`（dbus、pipewire 等），不再依赖 dinit。
 - **系统控制**：`jiminit reboot`、`poweroff`、`halt`、`soft-reboot`、`kexec`、
   `suspend`、`hibernate`，不再需要给 PID 1 发信号。
 - **日志**：10 级标签（`[ SUCC ]`、`[ INFO ]`、`[ MESG ]`、`[ WARN ]`、`[ERR OR]`、
@@ -65,13 +67,13 @@ jiminit graph   # Graphviz DOT
 
 | 层 | 入口 |
 | --- | --- |
-| 使用 | [上手](docs/usage/getting-started.md) · [配置](docs/usage/configuration.md) · [服务](docs/usage/services.md) · [会话与运行级](docs/usage/sessions-and-runlevels.md) · [安装](docs/usage/installation.md) |
+| 使用 | [上手](docs/usage/getting-started.md) · [配置](docs/usage/configuration.md) · [服务](docs/usage/services.md) · [会话与运行级](docs/usage/sessions-and-runlevels.md) · [用户会话](docs/usage/user-services.md) · [安装](docs/usage/installation.md) |
 | 开发 | [架构](docs/development/architecture.md) · [构建与镜像](docs/development/building.md) · [测试](docs/development/testing.md) |
 | 参考 | [配置速查](docs/reference/configuration-reference.md) · [已知限制](docs/reference/limitations.md) · [设计取舍](docs/reference/design-notes.md) |
 
 ## 项目状态
 
-- 108 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
+- 113 个单元测试；`smoke-test.sh` 覆盖主路径，另有 LUKS/LVM、独立 `/usr`、
   coldplug+真实 fsck 三条冒烟路径各自 PASS。
 - 只在 QEMU x86_64 上验证过；aarch64 只验证了构建路径，未实机测试。
 - 这是个人实验项目，不追求 systemd 兼容，也不适合直接替换生产环境的 init。

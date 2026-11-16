@@ -1,0 +1,4 @@
+# PulseAudio compatibility layer.
+exec = "/usr/bin/pipewire-pulse"
+depends_on = ["pipewire"]
+restart = "always"

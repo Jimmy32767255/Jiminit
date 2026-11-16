@@ -509,6 +509,9 @@ pub struct Supervisor {
     ready_timeout: Duration,
     stopping: bool,
     level: Level,
+    /// Runtime directory for notify sockets (default `/run/jiminit`; a user
+    /// instance points it at `$XDG_RUNTIME_DIR/jiminit`).
+    run_dir: PathBuf,
 }
 
 impl Supervisor {
@@ -581,6 +584,7 @@ impl Supervisor {
             ready_timeout: Duration::from_millis(5_000),
             stopping: false,
             level,
+            run_dir: PathBuf::from("/run/jiminit"),
         }
     }
 
@@ -597,6 +601,12 @@ impl Supervisor {
 
     pub fn set_ready_timeout(&mut self, timeout: Duration) {
         self.ready_timeout = timeout;
+    }
+
+    /// Where sd_notify sockets live; a user instance keeps them in its own
+    /// `$XDG_RUNTIME_DIR` instead of `/run/jiminit`.
+    pub fn set_run_dir(&mut self, dir: PathBuf) {
+        self.run_dir = dir;
     }
 
     /// Queue every member of the current runlevel that is not running yet.
@@ -1165,7 +1175,8 @@ impl Supervisor {
     }
 
     fn notify_socket(&mut self, name: &str) -> Result<String> {
-        let dir = Path::new("/run/jiminit/notify");
+        let dir = self.run_dir.join("notify");
+        let dir = dir.as_path();
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let path = dir.join(format!("{}.sock", name.replace('/', "_")));
         let _ = std::fs::remove_file(&path);
@@ -1727,6 +1738,7 @@ fn build_env(spec: &ServiceSpec, notify_path: Option<&str>, home: Option<&str>) 
             value.as_os_str().as_bytes().to_vec(),
         );
     }
+    let inherited_home = vars.contains_key(b"HOME".as_slice());
     let mut set = |key: &str, value: &str| {
         vars.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec());
     };
@@ -1734,7 +1746,13 @@ fn build_env(spec: &ServiceSpec, notify_path: Option<&str>, home: Option<&str>) 
         "PATH",
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     );
-    set("HOME", home.unwrap_or("/root"));
+    // An inherited HOME belongs to the instance (a user session); only fall
+    // back to /root when neither the spec nor the environment names one.
+    match home {
+        Some(home) => set("HOME", home),
+        None if !inherited_home => set("HOME", "/root"),
+        None => {}
+    }
     set("JIMINIT_SERVICE", &spec.name);
     if let Some(user) = &spec.user {
         set("USER", user);

@@ -1220,7 +1220,7 @@ fn shutdown(
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    drop(wait);
+    wait.finish();
     crate::info!("flushing filesystems");
     nix::unistd::sync();
 

@@ -145,6 +145,10 @@ name  device  keyfile  options
 | `jiminit suspend` | 向 `/sys/power/state` 写 `mem`，唤醒后才返回 |
 | `jiminit hibernate` | 向 `/sys/power/state` 写 `disk`，需要 swap 与 `resume=` |
 | `jiminit metrics` | 以 Prometheus 文本格式输出运行级与服务指标 |
+| `jiminit userspawn` | （root）监视 `/run/user/<uid>`，为每个登录会话启动 `--user` |
+| `jiminit --user` | 启动当前会话的用户实例 |
+| `jiminit --user status\|list\|metrics\|service ...` | 操作会话实例；socket 在 `$XDG_RUNTIME_DIR/jiminit/jiminit.sock` |
+| `jiminit --user stop` | 停止当前会话的用户实例（电源类命令会被拒绝） |
 | `jiminit notify-send <socket> <message>` | 发 sd_notify 数据报（服务脚本内部使用） |
 | `jiminit check` | 校验配置与服务依赖，打印缩进依赖树与启动顺序 |
 | `jiminit graph` | 以 Graphviz DOT 输出服务依赖图（不连接运行中的 init） |

@@ -1,0 +1,4 @@
+# PipeWire session/policy manager.
+exec = "/usr/bin/wireplumber"
+depends_on = ["pipewire"]
+restart = "always"

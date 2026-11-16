@@ -28,10 +28,12 @@ mod runlevel;
 mod service;
 mod stage1;
 mod stage2;
+mod user;
 
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixDatagram, UnixStream};
+use std::path::Path;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +94,13 @@ fn run_command() -> Option<i32> {
         log::set_color(cfg.color_choice());
     }
 
+    let user_socket = user::control_path();
+    let path: &Path = if parsed.user {
+        &user_socket
+    } else {
+        Path::new(stage2::CONTROL_PATH)
+    };
+
     let code = match parsed.command {
         cli::Command::Help => {
             print!("{}", cli::USAGE);
@@ -101,28 +110,57 @@ fn run_command() -> Option<i32> {
             println!("jiminit {}", env!("CARGO_PKG_VERSION"));
             0
         }
-        cli::Command::Check => run_check(),
-        cli::Command::Graph => run_graph(),
+        cli::Command::RunUser => run_or_report(user::run(), "start the user instance"),
+        cli::Command::Userspawn => run_or_report(user::userspawn(), "start userspawn"),
+        cli::Command::StopInstance => {
+            if parsed.user {
+                run_client(path, "stop", Some(CLIENT_TIMEOUT))
+            } else {
+                usage_error("`stop` is only for a user instance (jiminit --user stop)")
+            }
+        }
+        cli::Command::Check => {
+            if parsed.user {
+                usage_error("`check` validates the system profile; run it without --user")
+            } else {
+                run_check()
+            }
+        }
+        cli::Command::Graph => {
+            if parsed.user {
+                usage_error("`graph` validates the system profile; run it without --user")
+            } else {
+                run_graph()
+            }
+        }
         cli::Command::NotifySend { socket, message } => notify_send(&socket, &message),
-        cli::Command::Status { service, watch } => run_status(service.as_deref(), watch),
-        cli::Command::List => run_client("list", Some(CLIENT_TIMEOUT)),
-        cli::Command::Metrics => run_client("metrics", Some(CLIENT_TIMEOUT)),
+        cli::Command::Status { service, watch } => run_status(path, service.as_deref(), watch),
+        cli::Command::List => run_client(path, "list", Some(CLIENT_TIMEOUT)),
+        cli::Command::Metrics => run_client(path, "metrics", Some(CLIENT_TIMEOUT)),
         cli::Command::Service { action, name } => run_client(
+            path,
             &format!("service {} {name}", action.as_str()),
             Some(CLIENT_TIMEOUT),
         ),
         cli::Command::Runlevel { target } => match target {
-            Some(level) => run_client(&format!("runlevel {level}"), Some(CLIENT_TIMEOUT)),
-            None => run_client("runlevel", Some(CLIENT_TIMEOUT)),
+            Some(_) if parsed.user => {
+                usage_error("a user instance has no runlevels to switch; `runlevel` only queries")
+            }
+            Some(level) => run_client(path, &format!("runlevel {level}"), Some(CLIENT_TIMEOUT)),
+            None => run_client(path, "runlevel", Some(CLIENT_TIMEOUT)),
         },
         cli::Command::Power(action) => {
-            // Suspend and hibernate only answer after the machine wakes up.
-            let timeout = if action.answers_after_wake() {
-                None
+            if parsed.user {
+                usage_error("power operations are not available in a user instance")
             } else {
-                Some(CLIENT_TIMEOUT)
-            };
-            run_client(action.as_str(), timeout)
+                // Suspend and hibernate only answer after the machine wakes up.
+                let timeout = if action.answers_after_wake() {
+                    None
+                } else {
+                    Some(CLIENT_TIMEOUT)
+                };
+                run_client(path, action.as_str(), timeout)
+            }
         }
     };
     Some(code)
@@ -131,8 +169,25 @@ fn run_command() -> Option<i32> {
 /// How long the client waits for the init's reply before giving up.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Run a blocking instance command and map failures to exit code 1.
+fn run_or_report(result: anyhow::Result<()>, what: &str) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            crate::error!("cannot {what}: {e:#}");
+            1
+        }
+    }
+}
+
+/// Reject a command that does not fit the selected mode.
+fn usage_error(message: &str) -> i32 {
+    eprintln!("jiminit: {message}");
+    2
+}
+
 /// `status [service] [--watch]`: print once, or clear and repeat.
-fn run_status(service: Option<&str>, watch: Option<u64>) -> i32 {
+fn run_status(path: &Path, service: Option<&str>, watch: Option<u64>) -> i32 {
     let request = match service {
         Some(name) => format!("status {name}"),
         None => "status".to_string(),
@@ -143,7 +198,7 @@ fn run_status(service: Option<&str>, watch: Option<u64>) -> i32 {
             clear_screen();
         }
         first = false;
-        let code = run_client(&request, Some(CLIENT_TIMEOUT));
+        let code = run_client(path, &request, Some(CLIENT_TIMEOUT));
         let Some(secs) = watch else {
             return code;
         };
@@ -228,19 +283,21 @@ fn graph_config() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_client(request: &str, read_timeout: Option<Duration>) -> i32 {
-    let path = stage2::CONTROL_PATH;
+fn run_client(path: &Path, request: &str, read_timeout: Option<Duration>) -> i32 {
     let mut stream = match UnixStream::connect(path) {
         Ok(stream) => stream,
         Err(e) => {
-            eprintln!("jiminit: cannot connect to {path}: {e} (is jiminit running as pid 1?)");
+            eprintln!(
+                "jiminit: cannot connect to {}: {e} (is the instance running?)",
+                path.display()
+            );
             return 1;
         }
     };
     let _ = stream.set_read_timeout(read_timeout);
 
     if let Err(e) = stream.write_all(request.as_bytes()) {
-        eprintln!("jiminit: cannot send to {path}: {e}");
+        eprintln!("jiminit: cannot send to {}: {e}", path.display());
         return 1;
     }
 

@@ -1,0 +1,4 @@
+# Session bus. XDG_RUNTIME_DIR is set by the user instance's session.
+exec = "/bin/sh"
+args = ["-c", "exec dbus-daemon --session --address=\"unix:path=$XDG_RUNTIME_DIR/bus\" --nofork --nopidfile"]
+restart = "always"

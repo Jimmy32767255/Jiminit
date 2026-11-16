@@ -16,6 +16,7 @@ Jiminit 是一个用 Rust 写的实验性 GNU/Linux init：单二进制、两个
 | [配置](usage/configuration.md) | `/etc/jiminit.toml` 的写法与语义 |
 | [服务](usage/services.md) | 服务定义、依赖、重启、就绪、看门狗、资源限制 |
 | [会话与运行级](usage/sessions-and-runlevels.md) | getty/login、运行级切换、控制 socket、信号与软重启 |
+| [用户级会话实例](usage/user-services.md) | `jiminit --user`、`userspawn`、dinit 用户服务迁移 |
 | [安装到真实系统](usage/installation.md) | install.sh、PKGBUILD、mkinitcpio、交叉构建 |
 
 ## 开发

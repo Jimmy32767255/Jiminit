@@ -22,6 +22,7 @@ jiminit 是单二进制、两阶段的 init：同一个可执行文件既能当 
 | `src/stage1.rs` | initramfs 阶段：模块、crypttab、LVM、根设备、fsck、fstab、pivot_root |
 | `src/stage2.rs` | PID 1 主循环：信号、收尸、getty、控制 socket、关机/软重启、rescue |
 | `src/service.rs` | 服务解析、依赖图、重启、就绪、看门狗、cgroup、日志转发 |
+| `src/user.rs` | 用户会话实例（`--user`）与 `userspawn` 登录监视器 |
 | `src/runlevel.rs` | `single`/`multi-user`/`graphical`、数字别名、特殊目标 |
 | `src/accounts.rs` | `/etc/passwd`、`/etc/group` 解析（无 NSS） |
 | `src/cgroup.rs` | cgroup v2 子组、控制器、限制、OOM 计数 |

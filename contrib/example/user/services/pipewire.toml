@@ -1,0 +1,4 @@
+# Audio server; starts once the session bus is ready.
+exec = "/usr/bin/pipewire"
+depends_on = ["dbus"]
+restart = "always"

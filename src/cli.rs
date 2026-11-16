@@ -102,6 +102,12 @@ pub enum Command {
         socket: String,
         message: String,
     },
+    /// `--user` without a command: start this session's user instance.
+    RunUser,
+    /// `userspawn` (root): start one user instance per `/run/user/<uid>`.
+    Userspawn,
+    /// `--user stop`: stop this session's user instance.
+    StopInstance,
     Help,
     Version,
 }
@@ -110,6 +116,8 @@ pub enum Command {
 pub struct Parsed {
     pub command: Command,
     pub no_color: bool,
+    /// Talk to (or start) the user-session instance instead of the system one.
+    pub user: bool,
 }
 
 pub const USAGE: &str = "\
@@ -126,6 +134,12 @@ System control:
   kexec                     reboot into a kernel image already loaded in memory
   suspend                   suspend to RAM
   hibernate                 hibernate to disk
+
+User session:
+  --user                    start this session's user instance (no command),
+                            or run the command against it
+  stop                      stop this session's user instance (with --user)
+  userspawn                 (root) start a user instance per /run/user session
 
 Services:
   status [service]          current runlevel and service state
@@ -168,19 +182,25 @@ pub fn parse(args: &[String]) -> Result<Option<Parsed>, String> {
 
     let mut rest: Vec<&str> = Vec::with_capacity(args.len());
     let mut no_color = false;
+    let mut user = false;
     for arg in args {
-        if arg == "--no-color" {
-            no_color = true;
-        } else {
-            rest.push(arg);
+        match arg.as_str() {
+            "--no-color" => no_color = true,
+            "--user" => user = true,
+            _ => rest.push(arg),
         }
     }
 
     let Some((name, tail)) = rest.split_first() else {
-        return Ok(Some(Parsed {
-            command: Command::Help,
-            no_color,
-        }));
+        return Ok(if user {
+            Some(Parsed {
+                command: Command::RunUser,
+                no_color,
+                user,
+            })
+        } else {
+            None
+        });
     };
 
     let command = match *name {
@@ -218,6 +238,14 @@ pub fn parse(args: &[String]) -> Result<Option<Parsed>, String> {
             no_arguments("graph", tail)?;
             Command::Graph
         }
+        "userspawn" => {
+            no_arguments("userspawn", tail)?;
+            Command::Userspawn
+        }
+        "stop" => {
+            no_arguments("stop", tail)?;
+            Command::StopInstance
+        }
         "notify-send" => match tail {
             [socket, message] => Command::NotifySend {
                 socket: (*socket).to_string(),
@@ -228,7 +256,11 @@ pub fn parse(args: &[String]) -> Result<Option<Parsed>, String> {
         other => return Err(format!("unknown command `{other}` (try `jiminit --help`)")),
     };
 
-    Ok(Some(Parsed { command, no_color }))
+    Ok(Some(Parsed {
+        command,
+        no_color,
+        user,
+    }))
 }
 
 fn parse_status(tail: &[&str]) -> Result<Command, String> {
@@ -463,6 +495,27 @@ mod tests {
             }
         );
         assert!(parse_args(&["notify-send", "/run/notify.sock"]).is_err());
+    }
+
+    #[test]
+    #[test]
+    fn user_modifier_selects_the_session_instance() {
+        let parsed = parse_args(&["--user"]).unwrap().unwrap();
+        assert!(parsed.user);
+        assert_eq!(parsed.command, Command::RunUser);
+        let parsed = parse_args(&["--user", "status"]).unwrap().unwrap();
+        assert!(parsed.user);
+        assert_eq!(
+            parsed.command,
+            Command::Status {
+                service: None,
+                watch: None
+            }
+        );
+        let parsed = parse_args(&["--user", "stop"]).unwrap().unwrap();
+        assert_eq!(parsed.command, Command::StopInstance);
+        assert_eq!(command(&["userspawn"]), Command::Userspawn);
+        assert!(parse_args(&["userspawn", "now"]).is_err());
     }
 
     #[test]

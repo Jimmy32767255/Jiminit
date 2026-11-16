@@ -67,6 +67,9 @@
   需要可用的 swap 与正确的 `resume=` 内核参数，jiminit 本身不准备这些。
 - `kexec` 只负责“检查已加载 + RB_KEXEC”，不调用 `kexec -l`，也不管理 initramfs/命令行；
   新内核镜像必须事先由 `kexec-tools`（或等价工具）加载好，否则命令会拒绝执行。
+- 用户实例（`jiminit --user`）不启用 cgroup（没有资源限制与 OOM/CPU/IO 统计），没有
+  getty/运行级/电源操作，`log_file` 键不生效（日志归 `userspawn` 服务的日志）；它按
+  `/run/user/<uid>` 判断会话，不看 utmp，也没有“清除残留会话目录”的额外逻辑。
 
 ## 软重启
 

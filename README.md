@@ -23,8 +23,8 @@ Jiminit 从 initramfs 接管启动（模块、fsck、fstab、LUKS/LVM、`pivot_r
   `jiminit --user` 监督 `~/.config/jiminit/services.d`（dbus、pipewire 等），不再依赖 dinit。
 - **系统控制**：`jiminit reboot`、`poweroff`、`halt`、`soft-reboot`、`kexec`、
   `suspend`、`hibernate`，不再需要给 PID 1 发信号。
-- **日志**：10 级标签（`[ SUCC ]`、`[ INFO ]`、`[ MESG ]`、`[ WARN ]`、`[ERR OR]`、
-  `[ FAIL ]`、`[CRITIC]`、`[DE BUG]`、`[TRACE ]`、`[ WAIT ]`）与标准亮色，`log_level`
+- **日志**：10 级标签（`[ SUCC ]`、`[ INFO ]`、`[ MESG ]`、`[ WARN ]`、`[ ERR  ]`、
+  `[ FAIL ]`、`[ CRIT ]`、`[ DBUG ]`、`[ TRCE ]`、`[ WAIT ]`）与标准亮色，`log_level`
   可调阈值；有上限的等待在终端显示 `<帧> 0s/3s` 计时与转圈动画（无上限显示 `0s/inf`），`color` 可配。
 - **CLI 体验**：操作都是子命令、选项只做修饰（`status --watch`、`--no-color`），
   `jiminit check` 打印缩进依赖树，`jiminit graph` 输出 DOT 依赖图。

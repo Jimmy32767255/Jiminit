@@ -10,8 +10,8 @@
 //! tag. Colors are only written to terminals and never reach kmsg or the log
 //! file.
 //!
-//! Tags, in increasing severity: `[TRACE ]`, `[DE BUG]`, `[ INFO ]`,
-//! `[ MESG ]`, `[ WARN ]`, `[ERR OR]`, `[CRITIC]`. `[ SUCC ]` and `[ FAIL ]`
+//! Tags, in increasing severity: `[ TRCE ]`, `[ DBUG ]`, `[ INFO ]`,
+//! `[ MESG ]`, `[ WARN ]`, `[ ERR  ]`, `[ CRIT ]`. `[ SUCC ]` and `[ FAIL ]`
 //! mark the outcome of one operation (logged at INFO and ERROR severity), and
 //! `[ WAIT ]` renders an animated progress line for a bounded wait.
 
@@ -37,16 +37,16 @@ const WAIT_GRACE: Duration = Duration::from_millis(300);
 const SPINNER: [char; 4] = ['-', '\\', '|', '/'];
 
 /// Every tag is exactly 6 characters wide between the brackets, e.g.
-/// `[ WARN ]`, `[DE BUG]`, `[TRACE ]`.
+/// `[ WARN ]`, `[ DBUG ]`, `[ TRCE ]`.
 const TAG_SUCC: &str = "[ SUCC ]";
 const TAG_INFO: &str = "[ INFO ]";
 const TAG_WARN: &str = "[ WARN ]";
 const TAG_MESG: &str = "[ MESG ]";
-const TAG_DEBUG: &str = "[DE BUG]";
-const TAG_TRACE: &str = "[TRACE ]";
+const TAG_DEBUG: &str = "[ DBUG ]";
+const TAG_TRACE: &str = "[ TRCE ]";
 const TAG_FAIL: &str = "[ FAIL ]";
-const TAG_ERROR: &str = "[ERR OR]";
-const TAG_CRIT: &str = "[CRITIC]";
+const TAG_ERROR: &str = "[ ERR  ]";
+const TAG_CRIT: &str = "[ CRIT ]";
 const TAG_WAIT: &str = "[ WAIT ]";
 
 const ANSI_SUCC: &str = "92";
